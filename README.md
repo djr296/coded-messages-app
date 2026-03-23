@@ -1,42 +1,64 @@
 # Coded Messages App
 
-Windows desktop app with account auth, profile updates, friend requests, persisted 1:1 chat, and coded-message display.
+Windows desktop chat app with account auth, friend requests, persisted 1:1 conversations, coded-message display, and optional plain-text sending.
 
-## Features implemented (Phase 2)
+## Features
 
 - Email/password register + login
+- Welcome email on account creation
 - Profile updates (username + profile image path)
 - Friend requests by username
 - Accept incoming requests
 - 1:1 conversations with persisted message history
-- Messages shown in app-specific coded text
+- Per-message send mode: `Encoded` or `Plain text`
 - Decrypter tab (paste coded text -> English)
-- Local backend API (Express) + local SQLite database (`sql.js`)
+- Cloud-hosted backend for multi-device use
+
+## Download For Windows
+
+Use the installer from the GitHub release page, not the green `Code` button on the repository.
+
+1. Open the repository on GitHub.
+2. On the right side, click `Releases`.
+3. Open the latest release.
+4. Under `Assets`, download `Coded Messages Setup 0.2.0.exe` or the newest installer version listed there.
+5. Run the installer.
+6. If Windows shows a warning, click `More info` and then `Run anyway` if you trust the release source.
+7. Finish installation and open `Coded Messages` from the Start menu or desktop shortcut.
+
+If there is no published GitHub Release yet, the installer has not been posted publicly yet.
+
+## For Testers
+
+- The first request can be slow if the free cloud server is waking up.
+- Welcome emails can take a minute and may land in spam/junk.
+- Existing local-only test accounts do not automatically appear in the cloud database.
 
 ## Tech stack
 
 - Desktop: Electron
 - API: Express
-- Database: SQLite via `sql.js`
+- Database:
+  - Local mode: SQLite via `sql.js`
+  - Hosted mode: Postgres
 - Auth: JWT + bcryptjs
+- Email: Nodemailer via SMTP
 
-## Run
+## Local development
 
-1. Open PowerShell in:
+1. Open PowerShell in the project folder:
 
 ```powershell
 cd "path\to\coded-messages-app"
 ```
 
-2. Start app:
+2. Start the app:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ".\start-app.ps1"
 ```
 
 ## Standalone backend mode
-
-This project can now run the API separately from the desktop app.
 
 Start the backend by itself:
 
@@ -48,7 +70,7 @@ Useful environment variables:
 
 - `CODED_MESSAGES_HOST`: bind host for the API server. Default: `0.0.0.0`
 - `PORT` or `CODED_MESSAGES_PORT`: API port. Default: `3847`
-- `CODED_MESSAGES_DB_PATH`: database file path
+- `CODED_MESSAGES_DB_PATH`: local database file path
 - `DATABASE_URL`: Postgres connection string for hosted databases such as Supabase
 - `CODED_MESSAGES_API_BASE`: API URL the Electron app should use
 - `SMTP_HOST`: SMTP server hostname for welcome emails
@@ -67,20 +89,23 @@ npm start
 ## Test workflow
 
 1. Create account A.
-2. Log out and create account B.
-3. From B, send friend request to A's username.
-4. Log back into A and accept request in `Requests`.
-5. Open the friend in `Friends` and send messages.
-6. Messages appear coded in chat view.
-7. Use `Decrypter` tab to decode pasted coded text.
+2. Create account B.
+3. From B, send a friend request to A's username.
+4. Log into A and accept the request in `Requests`.
+5. Open the friend in `Friends` and send one `Encoded` message.
+6. Send one `Plain text` message.
+7. Confirm both devices display each message in the selected mode.
+8. Use the `Decrypter` tab to decode pasted coded text.
 
 ## Project structure
 
-- `main.js`: Electron main process + API server startup
+- `main.js`: Electron main process + local API startup when not using a hosted backend
 - `preload.js`: Secure renderer bridge (`codedApi`, `codedMessages`)
-- `server/index.js`: Express + SQLite API implementation
+- `server/index.js`: Express API implementation for SQLite or Postgres
+- `server/start.js`: standalone backend entrypoint
+- `server/mailer.js`: SMTP mailer for welcome emails
 - `renderer/index.html`: UI markup
 - `renderer/styles.css`: UI styles
-- `renderer/app.js`: Frontend logic
-- `shared/codec.js`: Obfuscation encode/decode logic
-- `data/app.sqlite`: Local app database (created at runtime)
+- `renderer/app.js`: frontend logic
+- `shared/codec.js`: obfuscation encode/decode logic
+- `data/app.sqlite`: local app database (created at runtime in local mode)
