@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const initSqlJs = require("sql.js");
@@ -44,6 +45,18 @@ function convertNamedParams(sql, params = {}) {
 
 function normalizeMessageDisplayMode(value) {
   return value === "plain" ? "plain" : "coded";
+}
+
+function hashResetCode(code) {
+  return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+function generateResetCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function resetCodeExpiresAt() {
+  return new Date(Date.now() + (15 * 60 * 1000)).toISOString();
 }
 
 async function createSqliteDb(dbPath) {
@@ -128,6 +141,14 @@ async function createSqliteDb(dbPath) {
       conversation_id INTEGER NOT NULL,
       sender_id INTEGER NOT NULL,
       body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
       created_at TEXT NOT NULL
     )`
   ];
@@ -219,6 +240,14 @@ async function createPostgresDb(databaseUrl) {
       conversation_id BIGINT NOT NULL,
       sender_id BIGINT NOT NULL,
       body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id BIGSERIAL PRIMARY KEY,
+      user_id BIGINT NOT NULL,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
       created_at TEXT NOT NULL
     )`
   ];
@@ -370,6 +399,114 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
 
       const token = jwt.sign({ userId: Number(user.id) }, JWT_SECRET, { expiresIn: "7d" });
       return res.json({ token, user: publicUser(user) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/auth/request-password-reset", async (req, res, next) => {
+    try {
+      const email = String(req.body.email || "").trim().toLowerCase();
+      if (!email) {
+        return res.status(400).json({ error: "Email is required." });
+      }
+
+      const genericResponse = {
+        ok: true,
+        message: "If an account exists for that email, a reset code has been sent."
+      };
+
+      const user = await db.get("SELECT * FROM users WHERE email = $email", { $email: email });
+      if (!user) {
+        return res.json(genericResponse);
+      }
+
+      const code = generateResetCode();
+      const now = nowIso();
+      await db.run(
+        "UPDATE password_reset_tokens SET used_at = $usedAt WHERE user_id = $userId AND used_at IS NULL",
+        { $usedAt: now, $userId: user.id }
+      );
+      await db.insert(
+        "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, used_at, created_at) VALUES ($userId, $tokenHash, $expiresAt, NULL, $createdAt)",
+        {
+          $userId: user.id,
+          $tokenHash: hashResetCode(code),
+          $expiresAt: resetCodeExpiresAt(),
+          $createdAt: now
+        }
+      );
+      await db.persist();
+
+      if (mailer.enabled) {
+        setImmediate(async () => {
+          try {
+            await mailer.sendPasswordResetEmail({
+              email: user.email,
+              username: user.username,
+              code
+            });
+          } catch (mailError) {
+            console.error("Failed to send password reset email.");
+            console.error(mailError);
+          }
+        });
+      }
+
+      return res.json(genericResponse);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/auth/reset-password", async (req, res, next) => {
+    try {
+      const email = String(req.body.email || "").trim().toLowerCase();
+      const code = String(req.body.code || "").trim();
+      const password = String(req.body.password || "");
+
+      if (!email || !code || !password) {
+        return res.status(400).json({ error: "Email, reset code, and new password are required." });
+      }
+
+      if (password.length < 6) {
+        return res.status(400).json({ error: "Password must be at least 6 characters." });
+      }
+
+      const user = await db.get("SELECT * FROM users WHERE email = $email", { $email: email });
+      if (!user) {
+        return res.status(400).json({ error: "Invalid reset code or expired request." });
+      }
+
+      const resetToken = await db.get(
+        `SELECT * FROM password_reset_tokens
+         WHERE user_id = $userId
+           AND token_hash = $tokenHash
+           AND used_at IS NULL
+           AND expires_at >= $now
+         ORDER BY id DESC
+         LIMIT 1`,
+        { $userId: user.id, $tokenHash: hashResetCode(code), $now: nowIso() }
+      );
+
+      if (!resetToken) {
+        return res.status(400).json({ error: "Invalid reset code or expired request." });
+      }
+
+      const now = nowIso();
+      const hash = bcrypt.hashSync(password, 10);
+      await db.run("UPDATE users SET password_hash = $hash WHERE id = $id", { $hash: hash, $id: user.id });
+      await db.run("UPDATE password_reset_tokens SET used_at = $usedAt WHERE id = $id", {
+        $usedAt: now,
+        $id: resetToken.id
+      });
+      await db.run(
+        "UPDATE password_reset_tokens SET used_at = $usedAt WHERE user_id = $userId AND used_at IS NULL AND id != $id",
+        { $usedAt: now, $userId: user.id, $id: resetToken.id }
+      );
+      await db.persist();
+
+      return res.json({ ok: true, message: "Password updated. You can sign in now." });
     } catch (err) {
       next(err);
     }

@@ -25,8 +25,11 @@ const els = {
   authPassword: document.getElementById("auth-password"),
   authUsernameWrap: document.getElementById("auth-username-wrap"),
   authUsername: document.getElementById("auth-username"),
+  authResetCodeWrap: document.getElementById("auth-reset-code-wrap"),
+  authResetCode: document.getElementById("auth-reset-code"),
   authSubmit: document.getElementById("auth-submit"),
   authSwitch: document.getElementById("auth-switch"),
+  authForgot: document.getElementById("auth-forgot"),
   authError: document.getElementById("auth-error"),
 
   currentUser: document.getElementById("current-user"),
@@ -79,12 +82,33 @@ function setView(viewName) {
 function setAuthMode(mode) {
   state.authMode = mode;
   const register = mode === "register";
+  const requestReset = mode === "reset-request";
+  const confirmReset = mode === "reset-confirm";
 
-  els.authSubtitle.textContent = register ? "Create your account." : "Sign in to continue.";
-  els.authSubmit.textContent = register ? "Create Account" : "Sign In";
-  els.authSwitch.textContent = register ? "I already have an account" : "Create account";
+  els.authSubtitle.textContent = register
+    ? "Create your account."
+    : requestReset
+      ? "Enter your email and we'll send a reset code."
+      : confirmReset
+        ? "Enter your reset code and choose a new password."
+        : "Sign in to continue.";
+  els.authSubmit.textContent = register
+    ? "Create Account"
+    : requestReset
+      ? "Send Reset Code"
+      : confirmReset
+        ? "Reset Password"
+        : "Sign In";
+  els.authSwitch.textContent = register
+    ? "I already have an account"
+    : requestReset || confirmReset
+      ? "Back to sign in"
+      : "Create account";
   els.authUsernameWrap.classList.toggle("hidden", !register);
   els.authUsername.required = register;
+  els.authResetCodeWrap.classList.toggle("hidden", !confirmReset);
+  els.authResetCode.required = confirmReset;
+  els.authForgot.classList.toggle("hidden", register || requestReset || confirmReset);
   els.authError.textContent = "";
 }
 
@@ -129,6 +153,15 @@ function showConnectionBanner(text, { error = false, autoHideMs = 0 } = {}) {
 function hideConnectionBanner() {
   clearTimeout(connectionBannerTimer);
   els.connectionBanner.classList.add("hidden");
+}
+
+function clearAuthFields({ keepEmail = false } = {}) {
+  if (!keepEmail) {
+    els.authEmail.value = "";
+  }
+  els.authPassword.value = "";
+  els.authUsername.value = "";
+  els.authResetCode.value = "";
 }
 
 function setButtonBusy(button, busy, idleText, busyText) {
@@ -393,7 +426,13 @@ function wireEvents() {
   });
 
   els.authSwitch.addEventListener("click", () => {
+    clearAuthFields();
     setAuthMode(state.authMode === "login" ? "register" : "login");
+  });
+
+  els.authForgot.addEventListener("click", () => {
+    clearAuthFields({ keepEmail: true });
+    setAuthMode("reset-request");
   });
 
   els.authForm.addEventListener("submit", async (e) => {
@@ -403,9 +442,47 @@ function wireEvents() {
     const email = els.authEmail.value.trim();
     const password = els.authPassword.value;
     const username = els.authUsername.value.trim();
+    const resetCode = els.authResetCode.value.trim();
 
     try {
-      setButtonBusy(els.authSubmit, true, state.authMode === "register" ? "Create Account" : "Sign In", state.authMode === "register" ? "Creating..." : "Signing In...");
+      const idleText = state.authMode === "register"
+        ? "Create Account"
+        : state.authMode === "reset-request"
+          ? "Send Reset Code"
+          : state.authMode === "reset-confirm"
+            ? "Reset Password"
+            : "Sign In";
+      const busyText = state.authMode === "register"
+        ? "Creating..."
+        : state.authMode === "reset-request"
+          ? "Sending..."
+          : state.authMode === "reset-confirm"
+            ? "Resetting..."
+            : "Signing In...";
+      setButtonBusy(els.authSubmit, true, idleText, busyText);
+
+      if (state.authMode === "reset-request") {
+        const resp = await withServerWakeMessage(
+          () => window.codedApi.requestPasswordReset({ email }),
+          "Requesting a password reset code..."
+        );
+        els.authError.textContent = resp.message;
+        setAuthMode("reset-confirm");
+        els.authEmail.value = email;
+        return;
+      }
+
+      if (state.authMode === "reset-confirm") {
+        const resp = await withServerWakeMessage(
+          () => window.codedApi.resetPassword({ email, code: resetCode, password }),
+          "Updating your password..."
+        );
+        clearAuthFields({ keepEmail: true });
+        setAuthMode("login");
+        els.authError.textContent = resp.message;
+        return;
+      }
+
       const resp = state.authMode === "register"
         ? await withServerWakeMessage(
             () => window.codedApi.register({ email, password, username }),
@@ -429,7 +506,14 @@ function wireEvents() {
     } catch (err) {
       els.authError.textContent = normalizeErrorMessage(err);
     } finally {
-      setButtonBusy(els.authSubmit, false, state.authMode === "register" ? "Create Account" : "Sign In", "");
+      const idleText = state.authMode === "register"
+        ? "Create Account"
+        : state.authMode === "reset-request"
+          ? "Send Reset Code"
+          : state.authMode === "reset-confirm"
+            ? "Reset Password"
+            : "Sign In";
+      setButtonBusy(els.authSubmit, false, idleText, "");
     }
   });
 
@@ -444,6 +528,8 @@ function wireEvents() {
     syncMessageModeControls();
     setToken("");
     clearDecrypter();
+    clearAuthFields();
+    setAuthMode("login");
     renderCurrentUser();
     renderFriends();
     renderRequests();

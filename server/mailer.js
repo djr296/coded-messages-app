@@ -29,6 +29,9 @@ function createMailer() {
       enabled: false,
       async sendWelcomeEmail() {
         return false;
+      },
+      async sendPasswordResetEmail() {
+        return false;
       }
     };
   }
@@ -60,6 +63,32 @@ function createMailer() {
           "<p>Your account has been created successfully.</p>",
           `<p><strong>Username:</strong> ${username}</p>`,
           "<p>You can now sign in and start messaging.</p>"
+        ].join("")
+      });
+
+      return true;
+    },
+    async sendPasswordResetEmail({ email, username, code }) {
+      await transport.sendMail({
+        from: config.from,
+        to: email,
+        subject: "Coded Messages password reset code",
+        text: [
+          "We received a request to reset your Coded Messages password.",
+          "",
+          `Username: ${username}`,
+          `Reset code: ${code}`,
+          "",
+          "Enter this code in the app to choose a new password.",
+          "If you did not request this, you can ignore this email."
+        ].join("\n"),
+        html: [
+          "<h2>Coded Messages password reset</h2>",
+          "<p>We received a request to reset your password.</p>",
+          `<p><strong>Username:</strong> ${username}</p>`,
+          `<p><strong>Reset code:</strong> ${code}</p>`,
+          "<p>Enter this code in the app to choose a new password.</p>",
+          "<p>If you did not request this, you can ignore this email.</p>"
         ].join("")
       });
 

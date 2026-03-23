@@ -346,6 +346,14 @@ button {
   border: 1px solid var(--border);
 }
 
+.link-btn {
+  background: transparent;
+  color: var(--primary);
+  padding: 4px 0 0;
+  justify-self: start;
+  text-decoration: underline;
+}
+
 .small {
   padding: 7px 10px;
   font-size: 0.85rem;
