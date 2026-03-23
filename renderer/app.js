@@ -349,7 +349,11 @@ function wireEvents() {
       await window.codedApi.sendFriendRequest(state.token, username);
       els.friendUsernameInput.value = "";
       setFriendStatus(`Friend request sent to @${username}.`);
-      await refreshSocialData();
+      try {
+        await refreshSocialData();
+      } catch (_refreshErr) {
+        setFriendStatus(`Friend request sent to @${username}. Refresh the app if the lists look out of date.`);
+      }
     } catch (err) {
       setFriendStatus(err.message);
     }

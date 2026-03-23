@@ -562,7 +562,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
          JOIN users u1 ON u1.id = f.user_a_id
          JOIN users u2 ON u2.id = f.user_b_id
          WHERE f.user_a_id = $me OR f.user_b_id = $me
-         ORDER BY lower(username)`,
+         ORDER BY lower(CASE WHEN f.user_a_id = $me THEN u2.username ELSE u1.username END)`,
         { $me: req.user.id }
       );
 
