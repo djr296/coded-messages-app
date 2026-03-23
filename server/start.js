@@ -10,7 +10,10 @@ let serverHandle;
 async function start() {
   serverHandle = await createApiServer({ host, port, dbPath });
   console.log(`Coded Messages API listening on http://${serverHandle.host}:${serverHandle.port}`);
-  console.log(`Database path: ${serverHandle.dbPath}`);
+  console.log(`Database backend: ${serverHandle.databaseKind}`);
+  if (serverHandle.dbPath) {
+    console.log(`Database path: ${serverHandle.dbPath}`);
+  }
 }
 
 async function shutdown() {

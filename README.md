@@ -49,6 +49,7 @@ Useful environment variables:
 - `CODED_MESSAGES_HOST`: bind host for the API server. Default: `0.0.0.0`
 - `PORT` or `CODED_MESSAGES_PORT`: API port. Default: `3847`
 - `CODED_MESSAGES_DB_PATH`: database file path
+- `DATABASE_URL`: Postgres connection string for hosted databases such as Supabase
 - `CODED_MESSAGES_API_BASE`: API URL the Electron app should use
 
 Example: run the app against an external server instead of the embedded local API:
