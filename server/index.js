@@ -320,18 +320,24 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
       const user = await db.get("SELECT * FROM users WHERE email = $email", { $email: email });
       await db.persist();
 
-      try {
-        await mailer.sendWelcomeEmail({
-          email: user.email,
-          username: user.username
+      const token = jwt.sign({ userId: Number(user.id) }, JWT_SECRET, { expiresIn: "7d" });
+      res.json({ token, user: publicUser(user) });
+
+      if (mailer.enabled) {
+        setImmediate(async () => {
+          try {
+            await mailer.sendWelcomeEmail({
+              email: user.email,
+              username: user.username
+            });
+          } catch (mailError) {
+            console.error("Failed to send welcome email.");
+            console.error(mailError);
+          }
         });
-      } catch (mailError) {
-        console.error("Failed to send welcome email.");
-        console.error(mailError);
       }
 
-      const token = jwt.sign({ userId: Number(user.id) }, JWT_SECRET, { expiresIn: "7d" });
-      return res.json({ token, user: publicUser(user) });
+      return;
     } catch (err) {
       next(err);
     }

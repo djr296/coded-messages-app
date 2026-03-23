@@ -37,6 +37,10 @@ function createMailer() {
     host: config.host,
     port: config.port,
     secure: config.secure,
+    requireTLS: !config.secure,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
     auth: {
       user: config.user,
       pass: config.pass
