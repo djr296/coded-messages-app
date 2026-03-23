@@ -51,6 +51,11 @@ Useful environment variables:
 - `CODED_MESSAGES_DB_PATH`: database file path
 - `DATABASE_URL`: Postgres connection string for hosted databases such as Supabase
 - `CODED_MESSAGES_API_BASE`: API URL the Electron app should use
+- `SMTP_HOST`: SMTP server hostname for welcome emails
+- `SMTP_PORT`: SMTP server port, usually `587` or `465`
+- `SMTP_USER`: SMTP username
+- `SMTP_PASS`: SMTP password or app password
+- `SMTP_FROM`: sender email, for example `Coded Messages <no-reply@yourdomain.com>`
 
 Example: run the app against an external server instead of the embedded local API:
 

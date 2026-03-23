@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const initSqlJs = require("sql.js");
 const { Pool } = require("pg");
+const { createMailer } = require("./mailer");
 
 const JWT_SECRET = process.env.CODED_MESSAGES_JWT_SECRET || "dev-secret-change-me";
 
@@ -269,13 +270,14 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
   }
 
   const db = await createDb({ dbPath: resolvedDbPath, databaseUrl: databaseUrl || process.env.DATABASE_URL });
+  const mailer = createMailer();
   const app = express();
 
   app.use(cors());
   app.use(express.json());
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, database: db.kind });
+    res.json({ ok: true, database: db.kind, mailer: mailer.enabled ? "configured" : "disabled" });
   });
 
   app.post("/auth/register", async (req, res, next) => {
@@ -317,6 +319,16 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
 
       const user = await db.get("SELECT * FROM users WHERE email = $email", { $email: email });
       await db.persist();
+
+      try {
+        await mailer.sendWelcomeEmail({
+          email: user.email,
+          username: user.username
+        });
+      } catch (mailError) {
+        console.error("Failed to send welcome email.");
+        console.error(mailError);
+      }
 
       const token = jwt.sign({ userId: Number(user.id) }, JWT_SECRET, { expiresIn: "7d" });
       return res.json({ token, user: publicUser(user) });
