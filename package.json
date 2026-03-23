@@ -1,0 +1,20 @@
+{
+  "name": "coded-messages-app",
+  "version": "0.2.0",
+  "description": "Windows desktop obfuscated chat app",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "server:start": "node server/start.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "sql.js": "^1.13.0"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0"
+  }
+}

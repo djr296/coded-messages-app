@@ -1,0 +1,6 @@
+node_modules/
+data/
+*.msi
+*.zip
+SHASUMS256.txt
+node-install.log

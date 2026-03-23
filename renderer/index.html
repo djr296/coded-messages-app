@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Coded Messages</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="auth-overlay" class="auth-overlay hidden">
+      <div class="auth-card">
+        <h1>Coded Messages</h1>
+        <p id="auth-subtitle">Sign in to continue.</p>
+        <form id="auth-form" class="auth-form">
+          <label for="auth-email">Email</label>
+          <input id="auth-email" type="email" required />
+
+          <label for="auth-password">Password</label>
+          <input id="auth-password" type="password" minlength="6" required />
+
+          <div id="auth-username-wrap" class="hidden">
+            <label for="auth-username">Username</label>
+            <input id="auth-username" type="text" />
+          </div>
+
+          <button id="auth-submit" type="submit">Sign In</button>
+          <button id="auth-switch" type="button" class="muted-btn">Create account</button>
+          <p id="auth-error" class="error"></p>
+        </form>
+      </div>
+    </div>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">Coded Messages</div>
+        <div id="current-user" class="current-user">Not signed in</div>
+        <button id="logout-btn" class="muted-btn small">Log Out</button>
+
+        <div class="menu-group">
+          <button class="menu-item active" data-view="chat">Chats</button>
+          <button class="menu-item" data-view="decrypt">Decrypter</button>
+          <button class="menu-item" data-view="profile">Profile</button>
+        </div>
+
+        <section class="side-section">
+          <h3>Add Friend</h3>
+          <div class="inline-input">
+            <input id="friend-username-input" type="text" placeholder="username" />
+            <button id="friend-add-btn" class="small">Add</button>
+          </div>
+          <p id="friend-status" class="status"></p>
+        </section>
+
+        <section class="side-section">
+          <h3>Requests</h3>
+          <div id="request-list" class="request-list"></div>
+        </section>
+
+        <section class="side-section">
+          <h3>Friends</h3>
+          <div id="chat-list" class="chat-list"></div>
+        </section>
+      </aside>
+
+      <main class="content">
+        <section id="chat-view" class="view active">
+          <header class="view-header">
+            <h1 id="chat-title">Select a friend</h1>
+          </header>
+          <div id="messages" class="messages"></div>
+          <form id="send-form" class="composer">
+            <input id="message-input" type="text" placeholder="Type message in English..." />
+            <button type="submit">Send</button>
+          </form>
+        </section>
+
+        <section id="decrypt-view" class="view">
+          <header class="view-header">
+            <h1>Decrypter</h1>
+          </header>
+          <label for="coded-input">Paste coded text</label>
+          <textarea id="coded-input" rows="8" placeholder="Paste coded message..."></textarea>
+          <button id="decode-btn" class="decode-btn">Decode to English</button>
+          <label for="decoded-output">English output</label>
+          <textarea id="decoded-output" rows="8" readonly></textarea>
+        </section>
+
+        <section id="profile-view" class="view">
+          <header class="view-header">
+            <h1>Profile</h1>
+          </header>
+          <form id="profile-form" class="profile-form">
+            <label for="profile-username">Username</label>
+            <input id="profile-username" type="text" required />
+
+            <label for="profile-image-path">Profile image path</label>
+            <input id="profile-image-path" type="text" placeholder="C:\\Users\\you\\Pictures\\avatar.png" />
+
+            <button type="submit">Save Profile</button>
+            <p id="profile-status" class="status"></p>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
