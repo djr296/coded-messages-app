@@ -4,3 +4,4 @@ data/
 *.zip
 SHASUMS256.txt
 node-install.log
+release/

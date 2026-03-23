@@ -3,7 +3,7 @@ const path = require("path");
 const { createApiServer } = require("./server");
 
 let apiServer;
-const externalApiBase = process.env.CODED_MESSAGES_API_BASE;
+const CLOUD_API_BASE = "https://coded-messages-api.onrender.com";
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -23,7 +23,12 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  if (!externalApiBase) {
+  const externalApiBase = process.env.CODED_MESSAGES_API_BASE;
+  const resolvedApiBase = externalApiBase || (app.isPackaged ? CLOUD_API_BASE : "http://127.0.0.1:3847");
+
+  process.env.CODED_MESSAGES_API_BASE = resolvedApiBase;
+
+  if (!externalApiBase && !app.isPackaged) {
     apiServer = await createApiServer({ port: 3847 });
   }
   createWindow();
