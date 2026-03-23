@@ -9,7 +9,13 @@
   <body>
     <div id="auth-overlay" class="auth-overlay hidden">
       <div class="auth-card">
-        <h1>Coded Messages</h1>
+        <div class="brand-lockup auth-brand">
+          <img src="../assets/app-icon.png" alt="Coded Messages icon" class="brand-icon" />
+          <div>
+            <h1>Coded Messages</h1>
+            <p class="brand-tagline">Private-looking chat with coded display built in.</p>
+          </div>
+        </div>
         <p id="auth-subtitle">Sign in to continue.</p>
         <form id="auth-form" class="auth-form">
           <label for="auth-email">Email</label>
@@ -32,7 +38,13 @@
 
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand">Coded Messages</div>
+        <div class="brand-lockup">
+          <img src="../assets/app-icon.png" alt="Coded Messages icon" class="brand-icon" />
+          <div>
+            <div class="brand">Coded Messages</div>
+            <div class="brand-subtitle">Cloud-synced coded chat</div>
+          </div>
+        </div>
         <div id="current-user" class="current-user">Not signed in</div>
         <button id="logout-btn" class="muted-btn small">Log Out</button>
 

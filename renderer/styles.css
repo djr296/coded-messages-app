@@ -40,11 +40,33 @@ body {
 }
 
 .auth-card h1 {
-  margin: 0 0 8px;
+  margin: 0 0 4px;
 }
 
 .auth-card p {
   margin-top: 0;
+}
+
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.auth-brand {
+  margin-bottom: 10px;
+}
+
+.brand-icon {
+  width: 50px;
+  height: 50px;
+  border-radius: 14px;
+  box-shadow: 0 10px 24px rgba(10, 108, 114, 0.18);
+}
+
+.brand-tagline {
+  color: var(--muted);
+  font-size: 0.92rem;
 }
 
 .auth-form {
@@ -70,6 +92,11 @@ body {
 .brand {
   font-size: 1.25rem;
   font-weight: 700;
+}
+
+.brand-subtitle {
+  font-size: 0.82rem;
+  color: var(--muted);
 }
 
 .current-user {

@@ -7,6 +7,8 @@ const CLOUD_API_BASE = "https://coded-messages-api.onrender.com";
 
 function createWindow() {
   const win = new BrowserWindow({
+    title: "Coded Messages",
+    icon: path.join(__dirname, "assets", "app-icon.png"),
     width: 1200,
     height: 780,
     minWidth: 980,

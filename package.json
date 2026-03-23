@@ -2,6 +2,7 @@
   "name": "coded-messages-app",
   "version": "0.2.0",
   "description": "Windows desktop obfuscated chat app",
+  "author": "Coded Messages",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -29,6 +30,7 @@
       "output": "release"
     },
     "files": [
+      "assets/**/*",
       "main.js",
       "preload.js",
       "package.json",
@@ -41,6 +43,7 @@
       "main": "main.js"
     },
     "win": {
+      "icon": "assets/app-icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -54,7 +57,10 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "installerIcon": "assets/app-icon.ico",
+      "uninstallerIcon": "assets/app-icon.ico",
+      "installerHeaderIcon": "assets/app-icon.ico"
     }
   }
 }
