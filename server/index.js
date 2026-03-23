@@ -316,7 +316,12 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
   app.use(express.json());
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, database: db.kind, mailer: mailer.enabled ? "configured" : "disabled" });
+    res.json({
+      ok: true,
+      database: db.kind,
+      mailer: mailer.provider,
+      mailConfigured: mailer.enabled
+    });
   });
 
   app.post("/auth/register", async (req, res, next) => {
@@ -888,6 +893,8 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
     port,
     dbPath: db.kind === "sqlite" ? resolvedDbPath : null,
     databaseKind: db.kind,
+    mailerProvider: mailer.provider,
+    mailerEnabled: mailer.enabled,
     close: async () => {
       await db.close();
       return new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));

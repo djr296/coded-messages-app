@@ -11,6 +11,10 @@ async function start() {
   serverHandle = await createApiServer({ host, port, dbPath });
   console.log(`Coded Messages API listening on http://${serverHandle.host}:${serverHandle.port}`);
   console.log(`Database backend: ${serverHandle.databaseKind}`);
+  console.log(`Mailer provider: ${serverHandle.mailerProvider}`);
+  if (!serverHandle.mailerEnabled) {
+    console.warn("Email sending is disabled. Configure BREVO_API_KEY and SMTP_FROM/BREVO_FROM to enable welcome and reset emails.");
+  }
   if (serverHandle.dbPath) {
     console.log(`Database path: ${serverHandle.dbPath}`);
   }
