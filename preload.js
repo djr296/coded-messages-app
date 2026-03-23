@@ -41,6 +41,10 @@ contextBridge.exposeInMainWorld("codedApi", {
   getFriends: (token) => request("/friends", { token }),
   getConversations: (token) => request("/conversations", { token }),
   getMessages: (token, conversationId) => request(`/conversations/${conversationId}/messages`, { token }),
-  sendMessage: (token, conversationId, body) =>
-    request(`/conversations/${conversationId}/messages`, { method: "POST", token, body: { body } })
+  sendMessage: (token, conversationId, body, displayMode = "coded") =>
+    request(`/conversations/${conversationId}/messages`, {
+      method: "POST",
+      token,
+      body: { body, display_mode: displayMode }
+    })
 });

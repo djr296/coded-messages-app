@@ -13,7 +13,8 @@ const state = {
   requests: [],
   selectedConversationId: null,
   selectedUsername: "",
-  messages: []
+  messages: [],
+  messageDisplayMode: "coded"
 };
 
 const els = {
@@ -38,10 +39,14 @@ const els = {
   friendAddBtn: document.getElementById("friend-add-btn"),
   friendStatus: document.getElementById("friend-status"),
 
+  connectionBanner: document.getElementById("connection-banner"),
   chatTitle: document.getElementById("chat-title"),
   messages: document.getElementById("messages"),
   sendForm: document.getElementById("send-form"),
   messageInput: document.getElementById("message-input"),
+  chatStatus: document.getElementById("chat-status"),
+  messageModeCoded: document.getElementById("message-mode-coded"),
+  messageModePlain: document.getElementById("message-mode-plain"),
 
   codedInput: document.getElementById("coded-input"),
   decodedOutput: document.getElementById("decoded-output"),
@@ -58,6 +63,8 @@ const views = {
   decrypt: document.getElementById("decrypt-view"),
   profile: document.getElementById("profile-view")
 };
+
+let connectionBannerTimer = null;
 
 function setView(viewName) {
   Object.entries(views).forEach(([name, el]) => {
@@ -98,13 +105,82 @@ function setFriendStatus(text) {
   els.friendStatus.textContent = text || "";
 }
 
+function setChatStatus(text) {
+  els.chatStatus.textContent = text || "";
+}
+
 function setProfileStatus(text) {
   els.profileStatus.textContent = text || "";
+}
+
+function showConnectionBanner(text, { error = false, autoHideMs = 0 } = {}) {
+  clearTimeout(connectionBannerTimer);
+  els.connectionBanner.textContent = text;
+  els.connectionBanner.classList.remove("hidden", "error", "online");
+  els.connectionBanner.classList.add(error ? "error" : "online");
+
+  if (autoHideMs > 0) {
+    connectionBannerTimer = setTimeout(() => {
+      els.connectionBanner.classList.add("hidden");
+    }, autoHideMs);
+  }
+}
+
+function hideConnectionBanner() {
+  clearTimeout(connectionBannerTimer);
+  els.connectionBanner.classList.add("hidden");
+}
+
+function setButtonBusy(button, busy, idleText, busyText) {
+  button.disabled = busy;
+  button.textContent = busy ? busyText : idleText;
+}
+
+function normalizeErrorMessage(err, fallback = "Something went wrong. Please try again.") {
+  const message = String(err && err.message ? err.message : fallback);
+
+  if (message.includes("Failed to fetch")) {
+    return "Can't reach the server right now. It may be waking up. Please wait a moment and try again.";
+  }
+
+  if (message === "Internal server error.") {
+    return "The server hit an error. Please wait a few seconds and try again.";
+  }
+
+  return message;
+}
+
+async function withServerWakeMessage(action, wakingText = "Connecting to the cloud server...") {
+  let showedWakeBanner = false;
+  const timer = setTimeout(() => {
+    showedWakeBanner = true;
+    showConnectionBanner(wakingText);
+  }, 1200);
+
+  try {
+    const result = await action();
+    clearTimeout(timer);
+    if (showedWakeBanner) {
+      showConnectionBanner("Connected to the cloud server.", { autoHideMs: 1800 });
+    } else {
+      hideConnectionBanner();
+    }
+    return result;
+  } catch (err) {
+    clearTimeout(timer);
+    showConnectionBanner(normalizeErrorMessage(err), { error: true });
+    throw err;
+  }
 }
 
 function clearDecrypter() {
   els.codedInput.value = "";
   els.decodedOutput.value = "";
+}
+
+function syncMessageModeControls() {
+  els.messageModeCoded.checked = state.messageDisplayMode !== "plain";
+  els.messageModePlain.checked = state.messageDisplayMode === "plain";
 }
 
 function renderCurrentUser() {
@@ -134,8 +210,11 @@ function renderFriends() {
     btn.addEventListener("click", () => {
       state.selectedConversationId = friend.conversation_id;
       state.selectedUsername = friend.username;
+      setChatStatus("Loading conversation...");
       renderFriends();
-      loadMessages();
+      loadMessages().catch((err) => {
+        setChatStatus(normalizeErrorMessage(err));
+      });
     });
     els.chatList.appendChild(btn);
   });
@@ -164,11 +243,18 @@ function renderRequests() {
     btn.textContent = "Accept";
     btn.addEventListener("click", async () => {
       try {
-        await window.codedApi.acceptFriendRequest(state.token, req.id);
+        setButtonBusy(btn, true, "Accept", "Accepting...");
+        setFriendStatus(`Accepting @${req.username}...`);
+        await withServerWakeMessage(
+          () => window.codedApi.acceptFriendRequest(state.token, req.id),
+          "Accepting friend request..."
+        );
         await refreshSocialData();
         setFriendStatus(`Accepted @${req.username}.`);
       } catch (err) {
-        setFriendStatus(err.message);
+        setFriendStatus(normalizeErrorMessage(err));
+      } finally {
+        setButtonBusy(btn, false, "Accept", "");
       }
     });
 
@@ -194,10 +280,11 @@ function renderMessages() {
     div.className = "msg " + (fromMe ? "me" : "them");
 
     const coded = document.createElement("div");
-    coded.textContent = window.codedMessages.encode(m.body);
+    const displayMode = m.display_mode === "plain" ? "plain" : "coded";
+    coded.textContent = displayMode === "plain" ? m.body : window.codedMessages.encode(m.body);
 
     const meta = document.createElement("small");
-    meta.textContent = fromMe ? "You" : m.sender_username;
+    meta.textContent = `${fromMe ? "You" : m.sender_username} • ${displayMode === "plain" ? "Plain text" : "Encoded"}`;
 
     div.appendChild(coded);
     div.appendChild(meta);
@@ -214,17 +301,23 @@ function fillProfileForm() {
 }
 
 async function refreshMe() {
-  const meResp = await window.codedApi.getMe(state.token);
+  const meResp = await withServerWakeMessage(
+    () => window.codedApi.getMe(state.token),
+    "Reconnecting to the cloud server..."
+  );
   state.me = meResp.user;
   renderCurrentUser();
   fillProfileForm();
 }
 
 async function refreshSocialData() {
-  const [friendsResp, requestsResp] = await Promise.all([
-    window.codedApi.getFriends(state.token),
-    window.codedApi.getFriendRequests(state.token)
-  ]);
+  const [friendsResp, requestsResp] = await withServerWakeMessage(
+    () => Promise.all([
+      window.codedApi.getFriends(state.token),
+      window.codedApi.getFriendRequests(state.token)
+    ]),
+    "Syncing chats and requests..."
+  );
 
   state.friends = friendsResp.friends;
   state.requests = requestsResp.requests;
@@ -258,18 +351,26 @@ async function loadMessages() {
     return;
   }
 
-  const resp = await window.codedApi.getMessages(state.token, state.selectedConversationId);
+  setChatStatus("Loading messages...");
+  const resp = await withServerWakeMessage(
+    () => window.codedApi.getMessages(state.token, state.selectedConversationId),
+    "Loading conversation from the cloud..."
+  );
   state.messages = resp.messages;
+  setChatStatus("");
   renderMessages();
 }
 
 async function bootstrap() {
   setAuthMode("login");
   setView("chat");
+  syncMessageModeControls();
+  setChatStatus("");
 
   if (!state.token) {
     clearDecrypter();
     showAuth(true);
+    hideConnectionBanner();
     return;
   }
 
@@ -282,6 +383,7 @@ async function bootstrap() {
     state.me = null;
     clearDecrypter();
     showAuth(true);
+    els.authError.textContent = "Session expired or the server could not be reached. Sign in again.";
   }
 }
 
@@ -303,9 +405,16 @@ function wireEvents() {
     const username = els.authUsername.value.trim();
 
     try {
+      setButtonBusy(els.authSubmit, true, state.authMode === "register" ? "Create Account" : "Sign In", state.authMode === "register" ? "Creating..." : "Signing In...");
       const resp = state.authMode === "register"
-        ? await window.codedApi.register({ email, password, username })
-        : await window.codedApi.login({ email, password });
+        ? await withServerWakeMessage(
+            () => window.codedApi.register({ email, password, username }),
+            "Creating your account and waking the server..."
+          )
+        : await withServerWakeMessage(
+            () => window.codedApi.login({ email, password }),
+            "Signing in and connecting to the server..."
+          );
 
       setToken(resp.token);
       state.me = resp.user;
@@ -318,7 +427,9 @@ function wireEvents() {
       els.authPassword.value = "";
       setFriendStatus("");
     } catch (err) {
-      els.authError.textContent = err.message;
+      els.authError.textContent = normalizeErrorMessage(err);
+    } finally {
+      setButtonBusy(els.authSubmit, false, state.authMode === "register" ? "Create Account" : "Sign In", "");
     }
   });
 
@@ -329,6 +440,8 @@ function wireEvents() {
     state.messages = [];
     state.selectedConversationId = null;
     state.selectedUsername = "";
+    state.messageDisplayMode = "coded";
+    syncMessageModeControls();
     setToken("");
     clearDecrypter();
     renderCurrentUser();
@@ -346,7 +459,12 @@ function wireEvents() {
     }
 
     try {
-      await window.codedApi.sendFriendRequest(state.token, username);
+      setButtonBusy(els.friendAddBtn, true, "Add", "Sending...");
+      setFriendStatus("Sending friend request...");
+      await withServerWakeMessage(
+        () => window.codedApi.sendFriendRequest(state.token, username),
+        "Sending friend request to the cloud server..."
+      );
       els.friendUsernameInput.value = "";
       setFriendStatus(`Friend request sent to @${username}.`);
       try {
@@ -355,7 +473,9 @@ function wireEvents() {
         setFriendStatus(`Friend request sent to @${username}. Refresh the app if the lists look out of date.`);
       }
     } catch (err) {
-      setFriendStatus(err.message);
+      setFriendStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.friendAddBtn, false, "Add", "");
     }
   });
 
@@ -364,15 +484,28 @@ function wireEvents() {
     const body = els.messageInput.value.trim();
 
     if (!body || !state.selectedConversationId) {
+      if (!state.selectedConversationId) {
+        setChatStatus("Choose a friend before sending a message.");
+      }
       return;
     }
 
     try {
-      await window.codedApi.sendMessage(state.token, state.selectedConversationId, body);
+      const sendButton = els.sendForm.querySelector("button[type='submit']");
+      setButtonBusy(sendButton, true, "Send", "Sending...");
+      setChatStatus(`Sending ${state.messageDisplayMode === "plain" ? "plain-text" : "encoded"} message...`);
+      await withServerWakeMessage(
+        () => window.codedApi.sendMessage(state.token, state.selectedConversationId, body, state.messageDisplayMode),
+        "Sending your message to the cloud server..."
+      );
       els.messageInput.value = "";
       await loadMessages();
+      setChatStatus(`Sent as ${state.messageDisplayMode === "plain" ? "plain text" : "encoded"} text.`);
     } catch (err) {
-      setFriendStatus(err.message);
+      setChatStatus(normalizeErrorMessage(err));
+    } finally {
+      const sendButton = els.sendForm.querySelector("button[type='submit']");
+      setButtonBusy(sendButton, false, "Send", "");
     }
   });
 
@@ -384,17 +517,33 @@ function wireEvents() {
     e.preventDefault();
 
     try {
-      const resp = await window.codedApi.updateProfile(state.token, {
-        username: els.profileUsername.value.trim(),
-        profile_image_path: els.profileImagePath.value.trim()
-      });
+      const submitButton = els.profileForm.querySelector("button[type='submit']");
+      setButtonBusy(submitButton, true, "Save Profile", "Saving...");
+      setProfileStatus("Saving profile...");
+      const resp = await withServerWakeMessage(
+        () => window.codedApi.updateProfile(state.token, {
+          username: els.profileUsername.value.trim(),
+          profile_image_path: els.profileImagePath.value.trim()
+        }),
+        "Saving your profile to the cloud..."
+      );
       state.me = resp.user;
       renderCurrentUser();
       setProfileStatus("Profile saved.");
       await refreshSocialData();
     } catch (err) {
-      setProfileStatus(err.message);
+      setProfileStatus(normalizeErrorMessage(err));
+    } finally {
+      const submitButton = els.profileForm.querySelector("button[type='submit']");
+      setButtonBusy(submitButton, false, "Save Profile", "");
     }
+  });
+
+  document.querySelectorAll("input[name='message-display-mode']").forEach((input) => {
+    input.addEventListener("change", () => {
+      state.messageDisplayMode = input.value === "plain" ? "plain" : "coded";
+      setChatStatus(`New messages will send as ${state.messageDisplayMode === "plain" ? "plain text" : "encoded text"}.`);
+    });
   });
 }
 

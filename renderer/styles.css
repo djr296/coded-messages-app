@@ -171,6 +171,27 @@ body {
   padding: 18px;
 }
 
+.connection-banner {
+  margin-bottom: 12px;
+  border: 1px solid rgba(10, 108, 114, 0.22);
+  background: linear-gradient(135deg, #effbfc, #f8ffff);
+  color: var(--primary);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.connection-banner.error {
+  border-color: rgba(180, 35, 24, 0.18);
+  background: linear-gradient(135deg, #fff2ef, #fff8f6);
+  color: var(--danger);
+}
+
+.connection-banner.online {
+  border-color: rgba(10, 108, 114, 0.22);
+}
+
 .view {
   display: none;
   height: calc(100vh - 36px);
@@ -178,7 +199,7 @@ body {
 
 .view.active {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto 1fr auto auto auto;
   gap: 14px;
 }
 
@@ -229,6 +250,57 @@ body {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 10px;
+}
+
+.send-mode-panel {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.send-mode-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.send-mode-copy strong {
+  font-size: 0.95rem;
+}
+
+.send-mode-copy span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.send-mode-options {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.send-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #f9fbfd;
+  cursor: pointer;
+  user-select: none;
+}
+
+.send-mode-option input {
+  margin: 0;
+}
+
+.chat-status {
+  min-height: 18px;
 }
 
 .profile-form {
@@ -300,5 +372,10 @@ button {
     border-right: 0;
     border-bottom: 1px solid var(--border);
     grid-template-rows: repeat(6, auto);
+  }
+
+  .send-mode-panel {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }

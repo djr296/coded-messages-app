@@ -75,6 +75,7 @@
       </aside>
 
       <main class="content">
+        <div id="connection-banner" class="connection-banner hidden" role="status" aria-live="polite"></div>
         <section id="chat-view" class="view active">
           <header class="view-header">
             <h1 id="chat-title">Select a friend</h1>
@@ -84,6 +85,23 @@
             <input id="message-input" type="text" placeholder="Type message in English..." />
             <button type="submit">Send</button>
           </form>
+          <div class="send-mode-panel">
+            <div class="send-mode-copy">
+              <strong>Send mode</strong>
+              <span>Choose whether this message appears coded or plain on both devices.</span>
+            </div>
+            <div class="send-mode-options" role="radiogroup" aria-label="Message display mode">
+              <label class="send-mode-option">
+                <input id="message-mode-coded" type="radio" name="message-display-mode" value="coded" checked />
+                <span>Encoded</span>
+              </label>
+              <label class="send-mode-option">
+                <input id="message-mode-plain" type="radio" name="message-display-mode" value="plain" />
+                <span>Plain text</span>
+              </label>
+            </div>
+          </div>
+          <p id="chat-status" class="status chat-status"></p>
         </section>
 
         <section id="decrypt-view" class="view">

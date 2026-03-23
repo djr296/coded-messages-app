@@ -42,6 +42,10 @@ function convertNamedParams(sql, params = {}) {
   return { text, values };
 }
 
+function normalizeMessageDisplayMode(value) {
+  return value === "plain" ? "plain" : "coded";
+}
+
 async function createSqliteDb(dbPath) {
   const SQL = await initSqlJs({
     locateFile: (file) => path.join(path.dirname(require.resolve("sql.js/dist/sql-wasm.js")), file)
@@ -129,6 +133,10 @@ async function createSqliteDb(dbPath) {
   ];
 
   createStatements.forEach((stmt) => run(stmt));
+  const messageColumns = all("PRAGMA table_info(messages)");
+  if (!messageColumns.some((column) => String(column.name) === "display_mode")) {
+    run("ALTER TABLE messages ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'coded'");
+  }
   persist();
 
   return {
@@ -218,6 +226,8 @@ async function createPostgresDb(databaseUrl) {
   for (const stmt of createStatements) {
     await run(stmt);
   }
+
+  await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_mode TEXT NOT NULL DEFAULT 'coded'");
 
   return {
     kind: "postgres",
@@ -667,7 +677,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
 
       const messages = (
         await db.all(
-          `SELECT m.id, m.sender_id, m.body, m.created_at, u.username AS sender_username
+          `SELECT m.id, m.sender_id, m.body, m.created_at, m.display_mode, u.username AS sender_username
            FROM messages m
            JOIN users u ON u.id = m.sender_id
            WHERE m.conversation_id = $c
@@ -679,6 +689,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
         sender_id: Number(m.sender_id),
         sender_username: m.sender_username,
         body: m.body,
+        display_mode: normalizeMessageDisplayMode(m.display_mode),
         created_at: m.created_at
       }));
 
@@ -692,6 +703,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
     try {
       const conversationId = Number(req.params.id);
       const body = String(req.body.body || "").trim();
+      const displayMode = normalizeMessageDisplayMode(req.body.display_mode);
 
       if (!conversationId || !body) {
         return res.status(400).json({ error: "Conversation id and body are required." });
@@ -702,12 +714,12 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
       }
 
       const row = await db.insert(
-        "INSERT INTO messages (conversation_id, sender_id, body, created_at) VALUES ($c, $s, $b, $created)",
-        { $c: conversationId, $s: req.user.id, $b: body, $created: nowIso() }
+        "INSERT INTO messages (conversation_id, sender_id, body, created_at, display_mode) VALUES ($c, $s, $b, $created, $displayMode)",
+        { $c: conversationId, $s: req.user.id, $b: body, $created: nowIso(), $displayMode: displayMode }
       );
       await db.persist();
 
-      const inserted = await db.get("SELECT id, sender_id, body, created_at FROM messages WHERE id = $id", {
+      const inserted = await db.get("SELECT id, sender_id, body, created_at, display_mode FROM messages WHERE id = $id", {
         $id: row.id
       });
 
@@ -716,6 +728,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
           id: Number(inserted.id),
           sender_id: Number(inserted.sender_id),
           body: inserted.body,
+          display_mode: normalizeMessageDisplayMode(inserted.display_mode),
           created_at: inserted.created_at
         }
       });
