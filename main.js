@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const path = require("path");
 const { createApiServer } = require("./server");
 
@@ -23,6 +23,22 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
+
+ipcMain.handle("pick-profile-image", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Choose profile image",
+    properties: ["openFile"],
+    filters: [
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }
+    ]
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return "";
+  }
+
+  return result.filePaths[0];
+});
 
 app.whenReady().then(async () => {
   const externalApiBase = process.env.CODED_MESSAGES_API_BASE;

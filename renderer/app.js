@@ -11,6 +11,7 @@ const state = {
   me: null,
   friends: [],
   requests: [],
+  outgoingRequests: [],
   selectedConversationId: null,
   selectedUsername: "",
   messages: [],
@@ -37,6 +38,8 @@ const els = {
 
   chatList: document.getElementById("chat-list"),
   requestList: document.getElementById("request-list"),
+  outgoingRequestList: document.getElementById("outgoing-request-list"),
+  removeFriendBtn: document.getElementById("remove-friend-btn"),
 
   friendUsernameInput: document.getElementById("friend-username-input"),
   friendAddBtn: document.getElementById("friend-add-btn"),
@@ -58,6 +61,7 @@ const els = {
   profileForm: document.getElementById("profile-form"),
   profileUsername: document.getElementById("profile-username"),
   profileImagePath: document.getElementById("profile-image-path"),
+  profileImageBrowse: document.getElementById("profile-image-browse"),
   profileStatus: document.getElementById("profile-status")
 };
 
@@ -216,12 +220,72 @@ function syncMessageModeControls() {
   els.messageModePlain.checked = state.messageDisplayMode === "plain";
 }
 
+function formatTimestamp(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function getSelectedFriend() {
+  if (!state.selectedConversationId) {
+    return null;
+  }
+
+  return state.friends.find((friend) => friend.conversation_id === state.selectedConversationId) || null;
+}
+
+function buildAvatar(path, label) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "avatar";
+
+  const img = document.createElement("img");
+  img.className = "avatar-image";
+  img.alt = label;
+
+  const fallback = document.createElement("div");
+  fallback.className = "avatar-fallback";
+  fallback.textContent = String(label || "?").trim().charAt(0).toUpperCase() || "?";
+
+  if (path) {
+    img.src = path;
+    img.addEventListener("error", () => {
+      img.classList.add("hidden");
+      fallback.classList.remove("hidden");
+    });
+  } else {
+    img.classList.add("hidden");
+  }
+
+  wrapper.appendChild(img);
+  wrapper.appendChild(fallback);
+  return wrapper;
+}
+
 function renderCurrentUser() {
   if (!state.me) {
     els.currentUser.textContent = "Not signed in";
     return;
   }
-  els.currentUser.textContent = `@${state.me.username} (${state.me.email})`;
+
+  els.currentUser.innerHTML = "";
+  els.currentUser.appendChild(buildAvatar(state.me.profile_image_path, state.me.username));
+
+  const details = document.createElement("div");
+  details.className = "user-summary";
+  details.innerHTML = `<strong>@${state.me.username}</strong><span>${state.me.email}</span>`;
+  els.currentUser.appendChild(details);
 }
 
 function renderFriends() {
@@ -239,7 +303,12 @@ function renderFriends() {
     const btn = document.createElement("button");
     const isActive = friend.conversation_id === state.selectedConversationId;
     btn.className = "contact-btn" + (isActive ? " active" : "");
-    btn.textContent = "@" + friend.username;
+    btn.appendChild(buildAvatar(friend.profile_image_path, friend.username));
+
+    const details = document.createElement("div");
+    details.className = "contact-summary";
+    details.innerHTML = `<strong>@${friend.username}</strong>`;
+    btn.appendChild(details);
     btn.addEventListener("click", () => {
       state.selectedConversationId = friend.conversation_id;
       state.selectedUsername = friend.username;
@@ -269,14 +338,23 @@ function renderRequests() {
     card.className = "request-card";
 
     const label = document.createElement("div");
-    label.textContent = `@${req.username}`;
+    label.className = "request-label";
+    label.appendChild(buildAvatar(req.profile_image_path, req.username));
+    const labelText = document.createElement("strong");
+    labelText.textContent = `@${req.username}`;
+    label.appendChild(labelText);
 
-    const btn = document.createElement("button");
-    btn.className = "small";
-    btn.textContent = "Accept";
-    btn.addEventListener("click", async () => {
+    const meta = document.createElement("small");
+    meta.className = "status";
+    meta.textContent = formatTimestamp(req.created_at);
+
+    const acceptBtn = document.createElement("button");
+    acceptBtn.className = "small";
+    acceptBtn.textContent = "Accept";
+    acceptBtn.addEventListener("click", async () => {
       try {
-        setButtonBusy(btn, true, "Accept", "Accepting...");
+        setButtonBusy(acceptBtn, true, "Accept", "Accepting...");
+        declineBtn.disabled = true;
         setFriendStatus(`Accepting @${req.username}...`);
         await withServerWakeMessage(
           () => window.codedApi.acceptFriendRequest(state.token, req.id),
@@ -287,13 +365,95 @@ function renderRequests() {
       } catch (err) {
         setFriendStatus(normalizeErrorMessage(err));
       } finally {
-        setButtonBusy(btn, false, "Accept", "");
+        setButtonBusy(acceptBtn, false, "Accept", "");
+        declineBtn.disabled = false;
+      }
+    });
+
+    const declineBtn = document.createElement("button");
+    declineBtn.className = "small muted-btn";
+    declineBtn.textContent = "Decline";
+    declineBtn.addEventListener("click", async () => {
+      try {
+        setButtonBusy(declineBtn, true, "Decline", "Declining...");
+        acceptBtn.disabled = true;
+        setFriendStatus(`Declining @${req.username}...`);
+        await withServerWakeMessage(
+          () => window.codedApi.declineFriendRequest(state.token, req.id),
+          "Declining friend request..."
+        );
+        await refreshSocialData();
+        setFriendStatus(`Declined @${req.username}.`);
+      } catch (err) {
+        setFriendStatus(normalizeErrorMessage(err));
+      } finally {
+        setButtonBusy(declineBtn, false, "Decline", "");
+        acceptBtn.disabled = false;
+      }
+    });
+
+    const actions = document.createElement("div");
+    actions.className = "request-card-actions";
+    actions.appendChild(acceptBtn);
+    actions.appendChild(declineBtn);
+
+    card.appendChild(label);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    els.requestList.appendChild(card);
+  });
+}
+
+function renderOutgoingRequests() {
+  els.outgoingRequestList.innerHTML = "";
+
+  if (state.outgoingRequests.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "status";
+    empty.textContent = "No outgoing requests.";
+    els.outgoingRequestList.appendChild(empty);
+    return;
+  }
+
+  state.outgoingRequests.forEach((req) => {
+    const card = document.createElement("div");
+    card.className = "request-card";
+
+    const label = document.createElement("div");
+    label.className = "request-label";
+    label.appendChild(buildAvatar(req.profile_image_path, req.username));
+    const labelText = document.createElement("strong");
+    labelText.textContent = `@${req.username}`;
+    label.appendChild(labelText);
+
+    const meta = document.createElement("small");
+    meta.className = "status";
+    meta.textContent = `Sent ${formatTimestamp(req.created_at)}`;
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "small muted-btn";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", async () => {
+      try {
+        setButtonBusy(cancelBtn, true, "Cancel", "Cancelling...");
+        setFriendStatus(`Cancelling request to @${req.username}...`);
+        await withServerWakeMessage(
+          () => window.codedApi.cancelFriendRequest(state.token, req.id),
+          "Cancelling outgoing request..."
+        );
+        await refreshSocialData();
+        setFriendStatus(`Cancelled request to @${req.username}.`);
+      } catch (err) {
+        setFriendStatus(normalizeErrorMessage(err));
+      } finally {
+        setButtonBusy(cancelBtn, false, "Cancel", "");
       }
     });
 
     card.appendChild(label);
-    card.appendChild(btn);
-    els.requestList.appendChild(card);
+    card.appendChild(meta);
+    card.appendChild(cancelBtn);
+    els.outgoingRequestList.appendChild(card);
   });
 }
 
@@ -302,10 +462,12 @@ function renderMessages() {
 
   if (!state.selectedConversationId) {
     els.chatTitle.textContent = "Select a friend";
+    els.removeFriendBtn.classList.add("hidden");
     return;
   }
 
   els.chatTitle.textContent = "Chat with @" + state.selectedUsername;
+  els.removeFriendBtn.classList.remove("hidden");
 
   state.messages.forEach((m) => {
     const div = document.createElement("div");
@@ -317,7 +479,7 @@ function renderMessages() {
     coded.textContent = displayMode === "plain" ? m.body : window.codedMessages.encode(m.body);
 
     const meta = document.createElement("small");
-    meta.textContent = `${fromMe ? "You" : m.sender_username} • ${displayMode === "plain" ? "Plain text" : "Encoded"}`;
+    meta.textContent = `${fromMe ? "You" : m.sender_username} • ${displayMode === "plain" ? "Plain text" : "Encoded"} • ${formatTimestamp(m.created_at)}`;
 
     div.appendChild(coded);
     div.appendChild(meta);
@@ -354,6 +516,7 @@ async function refreshSocialData() {
 
   state.friends = friendsResp.friends;
   state.requests = requestsResp.requests;
+  state.outgoingRequests = requestsResp.outgoing || [];
 
   if (!state.selectedConversationId) {
     const first = state.friends.find((f) => f.conversation_id);
@@ -374,6 +537,7 @@ async function refreshSocialData() {
 
   renderFriends();
   renderRequests();
+  renderOutgoingRequests();
   await loadMessages();
 }
 
@@ -521,6 +685,7 @@ function wireEvents() {
     state.me = null;
     state.friends = [];
     state.requests = [];
+    state.outgoingRequests = [];
     state.messages = [];
     state.selectedConversationId = null;
     state.selectedUsername = "";
@@ -533,6 +698,7 @@ function wireEvents() {
     renderCurrentUser();
     renderFriends();
     renderRequests();
+    renderOutgoingRequests();
     renderMessages();
     showAuth(true);
   });
@@ -622,6 +788,51 @@ function wireEvents() {
     } finally {
       const submitButton = els.profileForm.querySelector("button[type='submit']");
       setButtonBusy(submitButton, false, "Save Profile", "");
+    }
+  });
+
+  els.removeFriendBtn.addEventListener("click", async () => {
+    const selectedFriend = getSelectedFriend();
+    if (!selectedFriend) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Remove @${selectedFriend.username} from your friends list? This also removes your shared conversation history.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setButtonBusy(els.removeFriendBtn, true, "Remove Friend", "Removing...");
+      setChatStatus(`Removing @${selectedFriend.username}...`);
+      await withServerWakeMessage(
+        () => window.codedApi.removeFriend(state.token, selectedFriend.user_id),
+        "Updating your friends list..."
+      );
+      state.selectedConversationId = null;
+      state.selectedUsername = "";
+      state.messages = [];
+      await refreshSocialData();
+      setChatStatus(`Removed @${selectedFriend.username}.`);
+      renderMessages();
+    } catch (err) {
+      setChatStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.removeFriendBtn, false, "Remove Friend", "");
+    }
+  });
+
+  els.profileImageBrowse.addEventListener("click", async () => {
+    try {
+      const selectedPath = await window.codedApi.chooseProfileImage();
+      if (selectedPath) {
+        els.profileImagePath.value = selectedPath;
+        setProfileStatus("Profile image selected. Save profile to apply it.");
+      }
+    } catch (err) {
+      setProfileStatus(normalizeErrorMessage(err, "Couldn't open the image picker."));
     }
   });
 

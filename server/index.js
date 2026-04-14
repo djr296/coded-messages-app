@@ -59,6 +59,10 @@ function resetCodeExpiresAt() {
   return new Date(Date.now() + (15 * 60 * 1000)).toISOString();
 }
 
+function numericId(value) {
+  return Number(value);
+}
+
 async function createSqliteDb(dbPath) {
   const SQL = await initSqlJs({
     locateFile: (file) => path.join(path.dirname(require.resolve("sql.js/dist/sql-wasm.js")), file)
@@ -628,10 +632,26 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
         { $me: req.user.id }
       );
 
+      const outgoing = await db.all(
+        `SELECT fr.id, fr.created_at, u.id AS to_user_id, u.username, u.profile_image_path
+         FROM friend_requests fr
+         JOIN users u ON u.id = fr.to_user_id
+         WHERE fr.from_user_id = $me AND fr.status = 'pending'
+         ORDER BY fr.created_at DESC`,
+        { $me: req.user.id }
+      );
+
       res.json({
         requests: incoming.map((r) => ({
-          id: Number(r.id),
-          from_user_id: Number(r.from_user_id),
+          id: numericId(r.id),
+          from_user_id: numericId(r.from_user_id),
+          username: r.username,
+          profile_image_path: r.profile_image_path || "",
+          created_at: r.created_at
+        })),
+        outgoing: outgoing.map((r) => ({
+          id: numericId(r.id),
+          to_user_id: numericId(r.to_user_id),
           username: r.username,
           profile_image_path: r.profile_image_path || "",
           created_at: r.created_at
@@ -703,6 +723,60 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
     }
   });
 
+  app.post("/friends/request/:id/decline", requireAuth, async (req, res, next) => {
+    try {
+      const requestId = Number(req.params.id);
+      if (!requestId) {
+        return res.status(400).json({ error: "Invalid request id." });
+      }
+
+      const request = await db.get("SELECT * FROM friend_requests WHERE id = $id", { $id: requestId });
+      if (!request || Number(request.to_user_id) !== Number(req.user.id)) {
+        return res.status(404).json({ error: "Request not found." });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request is not pending." });
+      }
+
+      await db.run(
+        "UPDATE friend_requests SET status = 'declined', responded_at = $at WHERE id = $id",
+        { $at: nowIso(), $id: requestId }
+      );
+      await db.persist();
+      return res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/friends/request/:id/cancel", requireAuth, async (req, res, next) => {
+    try {
+      const requestId = Number(req.params.id);
+      if (!requestId) {
+        return res.status(400).json({ error: "Invalid request id." });
+      }
+
+      const request = await db.get("SELECT * FROM friend_requests WHERE id = $id", { $id: requestId });
+      if (!request || Number(request.from_user_id) !== Number(req.user.id)) {
+        return res.status(404).json({ error: "Request not found." });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request is not pending." });
+      }
+
+      await db.run(
+        "UPDATE friend_requests SET status = 'cancelled', responded_at = $at WHERE id = $id",
+        { $at: nowIso(), $id: requestId }
+      );
+      await db.persist();
+      return res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get("/friends", requireAuth, async (req, res, next) => {
     try {
       const rows = await db.all(
@@ -739,6 +813,53 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
       }
 
       res.json({ friends });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.delete("/friends/:userId", requireAuth, async (req, res, next) => {
+    try {
+      const friendUserId = Number(req.params.userId);
+      if (!friendUserId) {
+        return res.status(400).json({ error: "Invalid friend id." });
+      }
+
+      const [a, b] = makePair(Number(req.user.id), friendUserId);
+      const friendship = await db.get(
+        "SELECT * FROM friendships WHERE user_a_id = $a AND user_b_id = $b",
+        { $a: a, $b: b }
+      );
+
+      if (!friendship) {
+        return res.status(404).json({ error: "Friendship not found." });
+      }
+
+      const conversation = await db.get(
+        `SELECT c.id
+         FROM conversations c
+         JOIN conversation_members m1 ON m1.conversation_id = c.id AND m1.user_id = $u1
+         JOIN conversation_members m2 ON m2.conversation_id = c.id AND m2.user_id = $u2
+         LIMIT 1`,
+        { $u1: req.user.id, $u2: friendUserId }
+      );
+
+      await db.run("DELETE FROM friendships WHERE id = $id", { $id: friendship.id });
+      await db.run(
+        `DELETE FROM friend_requests
+         WHERE (from_user_id = $u1 AND to_user_id = $u2)
+            OR (from_user_id = $u2 AND to_user_id = $u1)`,
+        { $u1: req.user.id, $u2: friendUserId }
+      );
+
+      if (conversation) {
+        await db.run("DELETE FROM messages WHERE conversation_id = $id", { $id: conversation.id });
+        await db.run("DELETE FROM conversation_members WHERE conversation_id = $id", { $id: conversation.id });
+        await db.run("DELETE FROM conversations WHERE id = $id", { $id: conversation.id });
+      }
+
+      await db.persist();
+      return res.json({ ok: true });
     } catch (err) {
       next(err);
     }

@@ -75,6 +75,11 @@
         </section>
 
         <section class="side-section">
+          <h3>Outgoing Requests</h3>
+          <div id="outgoing-request-list" class="request-list"></div>
+        </section>
+
+        <section class="side-section">
           <h3>Friends</h3>
           <div id="chat-list" class="chat-list"></div>
         </section>
@@ -84,7 +89,10 @@
         <div id="connection-banner" class="connection-banner hidden" role="status" aria-live="polite"></div>
         <section id="chat-view" class="view active">
           <header class="view-header">
-            <h1 id="chat-title">Select a friend</h1>
+            <div class="chat-header-row">
+              <h1 id="chat-title">Select a friend</h1>
+              <button id="remove-friend-btn" class="muted-btn small hidden" type="button">Remove Friend</button>
+            </div>
           </header>
           <div id="messages" class="messages"></div>
           <form id="send-form" class="composer">
@@ -130,7 +138,10 @@
             <input id="profile-username" type="text" required />
 
             <label for="profile-image-path">Profile image path</label>
-            <input id="profile-image-path" type="text" placeholder="C:\\Users\\you\\Pictures\\avatar.png" />
+            <div class="profile-image-row">
+              <input id="profile-image-path" type="text" placeholder="C:\\Users\\you\\Pictures\\avatar.png" />
+              <button id="profile-image-browse" type="button" class="muted-btn small">Browse...</button>
+            </div>
 
             <button type="submit">Save Profile</button>
             <p id="profile-status" class="status"></p>

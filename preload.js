@@ -1,4 +1,4 @@
-const { contextBridge } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 const codec = require("./shared/codec");
 
 const API_BASE = process.env.CODED_MESSAGES_API_BASE || "http://127.0.0.1:3847";
@@ -40,6 +40,9 @@ contextBridge.exposeInMainWorld("codedApi", {
   sendFriendRequest: (token, username) => request("/friends/request", { method: "POST", token, body: { username } }),
   getFriendRequests: (token) => request("/friends/requests", { token }),
   acceptFriendRequest: (token, requestId) => request(`/friends/request/${requestId}/accept`, { method: "POST", token }),
+  declineFriendRequest: (token, requestId) => request(`/friends/request/${requestId}/decline`, { method: "POST", token }),
+  cancelFriendRequest: (token, requestId) => request(`/friends/request/${requestId}/cancel`, { method: "POST", token }),
+  removeFriend: (token, userId) => request(`/friends/${userId}`, { method: "DELETE", token }),
   getFriends: (token) => request("/friends", { token }),
   getConversations: (token) => request("/conversations", { token }),
   getMessages: (token, conversationId) => request(`/conversations/${conversationId}/messages`, { token }),
@@ -48,5 +51,6 @@ contextBridge.exposeInMainWorld("codedApi", {
       method: "POST",
       token,
       body: { body, display_mode: displayMode }
-    })
+    }),
+  chooseProfileImage: () => ipcRenderer.invoke("pick-profile-image")
 });
