@@ -23,6 +23,7 @@ const els = {
   authSubtitle: document.getElementById("auth-subtitle"),
   authForm: document.getElementById("auth-form"),
   authEmail: document.getElementById("auth-email"),
+  authPasswordLabel: document.querySelector("label[for='auth-password']"),
   authPassword: document.getElementById("auth-password"),
   authUsernameWrap: document.getElementById("auth-username-wrap"),
   authUsername: document.getElementById("auth-username"),
@@ -110,6 +111,9 @@ function setAuthMode(mode) {
       : "Create account";
   els.authUsernameWrap.classList.toggle("hidden", !register);
   els.authUsername.required = register;
+  els.authPasswordLabel.classList.toggle("hidden", requestReset);
+  els.authPassword.classList.toggle("hidden", requestReset);
+  els.authPassword.required = !requestReset;
   els.authResetCodeWrap.classList.toggle("hidden", !confirmReset);
   els.authResetCode.required = confirmReset;
   els.authForgot.classList.toggle("hidden", register || requestReset || confirmReset);
