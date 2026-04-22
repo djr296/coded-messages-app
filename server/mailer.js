@@ -91,6 +91,39 @@ async function sendBrevoEmail({ apiKey, from, to, subject, text, html }) {
   }
 }
 
+async function sendGoogleScriptEmail({ url, secret, to, subject, text, html }) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      secret,
+      to: to.email,
+      name: to.name || "",
+      subject,
+      text,
+      html
+    })
+  });
+
+  const body = await response.text().catch(() => "");
+  if (!response.ok) {
+    throw new Error(`Google mail webhook failed (${response.status}): ${body || "No response body"}`);
+  }
+
+  let payload = {};
+  try {
+    payload = body ? JSON.parse(body) : {};
+  } catch (_err) {
+    payload = {};
+  }
+
+  if (payload.ok === false) {
+    throw new Error(`Google mail webhook failed: ${payload.error || "Unknown error"}`);
+  }
+}
+
 function createDisabledMailer(reason) {
   return {
     enabled: false,
@@ -98,6 +131,50 @@ function createDisabledMailer(reason) {
     reason,
     sendWelcomeEmail: async () => {},
     sendPasswordResetEmail: async () => {}
+  };
+}
+
+function createGoogleScriptMailer() {
+  const url = String(process.env.GOOGLE_MAIL_WEBHOOK_URL || "").trim();
+  const secret = String(process.env.GOOGLE_MAIL_WEBHOOK_SECRET || "").trim();
+
+  if (!url && !secret) {
+    return null;
+  }
+
+  if (!url || !secret) {
+    return createDisabledMailer("GOOGLE_MAIL_WEBHOOK_URL and GOOGLE_MAIL_WEBHOOK_SECRET must both be configured.");
+  }
+
+  const send = async ({ email, username, content }) => {
+    await sendGoogleScriptEmail({
+      url,
+      secret,
+      to: { email, name: username || "" },
+      subject: content.subject,
+      text: content.text,
+      html: content.html
+    });
+  };
+
+  return {
+    enabled: true,
+    provider: "google-script",
+    reason: "",
+    sendWelcomeEmail: async ({ email, username }) => {
+      await send({
+        email,
+        username,
+        content: buildWelcomeContent({ username })
+      });
+    },
+    sendPasswordResetEmail: async ({ email, username, code }) => {
+      await send({
+        email,
+        username,
+        content: buildPasswordResetContent({ username, code })
+      });
+    }
   };
 }
 
@@ -151,6 +228,11 @@ function createBrevoMailer() {
 }
 
 function createMailer() {
+  const googleScriptMailer = createGoogleScriptMailer();
+  if (googleScriptMailer) {
+    return googleScriptMailer;
+  }
+
   const brevoMailer = createBrevoMailer();
   if (brevoMailer) {
     return brevoMailer;
