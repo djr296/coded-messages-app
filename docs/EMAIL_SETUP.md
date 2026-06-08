@@ -67,4 +67,4 @@ Example:
 
 ## Production Recommendation
 
-For a public `v1.0`, use a stable sender account or domain-backed mail provider. Password reset should be considered release-blocking until it is confirmed working in the hosted environment.
+For a future release that restores account-email features, use a stable sender account or domain-backed mail provider and fully retest welcome-email and password-reset delivery in the hosted environment before turning those flows back on in the app UI.

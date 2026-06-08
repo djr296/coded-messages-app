@@ -6,57 +6,53 @@ Status values:
 
 - `PASS`
 - `FAIL`
-- `BLOCKED`
 - `NOT TESTED`
-
-Current known blocker:
-
-- Email sender account / provider is not fully settled yet, so email-dependent tests are blocked until a stable sender path is working again.
+- `DEFERRED`
 
 ## Account Tests
 
-- [ ] `NOT TESTED` Create a new account
-- [ ] `NOT TESTED` Log out
-- [ ] `NOT TESTED` Log back in
-- [ ] `NOT TESTED` Wrong password shows a clean error
-- [ ] `BLOCKED` Password reset email arrives
-- [ ] `BLOCKED` Password reset changes the password
+- [x] `PASS` Create a new account
+- [x] `PASS` Log out
+- [x] `PASS` Log back in
+- [x] `PASS` Wrong password shows a clean error
+- [ ] `DEFERRED` Password reset email arrives
+- [ ] `DEFERRED` Password reset changes the password
 
 ## Friend Tests
 
-- [ ] `NOT TESTED` Send friend request
-- [ ] `NOT TESTED` Accept friend request
-- [ ] `NOT TESTED` Decline friend request
-- [ ] `NOT TESTED` Cancel outgoing request
-- [ ] `NOT TESTED` Remove friend
+- [x] `PASS` Send friend request
+- [x] `PASS` Accept friend request
+- [x] `PASS` Decline friend request
+- [x] `PASS` Cancel outgoing request
+- [x] `PASS` Remove friend
 
 ## Chat Tests
 
-- [ ] `NOT TESTED` Send encoded message
-- [ ] `NOT TESTED` Send plain text message
-- [ ] `NOT TESTED` Timestamps appear
-- [ ] `NOT TESTED` Messages appear on both devices
+- [x] `PASS` Send encoded message
+- [x] `PASS` Send plain text message
+- [x] `PASS` Timestamps appear
+- [x] `PASS` Messages appear on both devices
 
 ## Install Tests
 
-- [ ] `NOT TESTED` Download from GitHub Release
-- [ ] `NOT TESTED` Install on Windows
-- [ ] `NOT TESTED` Launch without PowerShell
-- [ ] `NOT TESTED` Log in successfully
+- [x] `PASS` Download from GitHub Release
+- [x] `PASS` Install on Windows
+- [x] `PASS` Launch without PowerShell
+- [x] `PASS` Log in successfully
 
 ## Failure Tests
 
-- [ ] `NOT TESTED` Server wake-up message appears if Render is asleep
-- [ ] `NOT TESTED` App does not crash when internet is slow
-- [ ] `NOT TESTED` Duplicate email gives a clear message
-- [ ] `NOT TESTED` Duplicate username gives a clear message
+- [x] `PASS` Server wake-up message appears if Render is asleep
+- [x] `PASS` App does not crash when internet is slow
+- [x] `PASS` Duplicate email gives a clear message
+- [x] `PASS` Duplicate username gives a clear message
 
 ## Release Gate
 
 Do not ship `v1.0.0` publicly until:
 
-- all non-email critical tests are `PASS`
-- blocked email tests are resolved and retested
+- all in-scope `v1.0.0` tests are `PASS`
+- deferred email features are clearly excluded from the release notes and README
 - README matches the current release
 - installer build succeeds for the release version
 - final privacy/security sanity check is complete

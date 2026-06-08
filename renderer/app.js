@@ -27,11 +27,8 @@ const els = {
   authPassword: document.getElementById("auth-password"),
   authUsernameWrap: document.getElementById("auth-username-wrap"),
   authUsername: document.getElementById("auth-username"),
-  authResetCodeWrap: document.getElementById("auth-reset-code-wrap"),
-  authResetCode: document.getElementById("auth-reset-code"),
   authSubmit: document.getElementById("auth-submit"),
   authSwitch: document.getElementById("auth-switch"),
-  authForgot: document.getElementById("auth-forgot"),
   authError: document.getElementById("auth-error"),
 
   currentUser: document.getElementById("current-user"),
@@ -87,36 +84,21 @@ function setView(viewName) {
 function setAuthMode(mode) {
   state.authMode = mode;
   const register = mode === "register";
-  const requestReset = mode === "reset-request";
-  const confirmReset = mode === "reset-confirm";
 
   els.authSubtitle.textContent = register
     ? "Create your account."
-    : requestReset
-      ? "Enter your email and we'll send a reset code."
-      : confirmReset
-        ? "Enter your reset code and choose a new password."
-        : "Sign in to continue.";
+    : "Sign in to continue.";
   els.authSubmit.textContent = register
     ? "Create Account"
-    : requestReset
-      ? "Send Reset Code"
-      : confirmReset
-        ? "Reset Password"
-        : "Sign In";
+    : "Sign In";
   els.authSwitch.textContent = register
     ? "I already have an account"
-    : requestReset || confirmReset
-      ? "Back to sign in"
-      : "Create account";
+    : "Create account";
   els.authUsernameWrap.classList.toggle("hidden", !register);
   els.authUsername.required = register;
-  els.authPasswordLabel.classList.toggle("hidden", requestReset);
-  els.authPassword.classList.toggle("hidden", requestReset);
-  els.authPassword.required = !requestReset;
-  els.authResetCodeWrap.classList.toggle("hidden", !confirmReset);
-  els.authResetCode.required = confirmReset;
-  els.authForgot.classList.toggle("hidden", register || requestReset || confirmReset);
+  els.authPasswordLabel.classList.remove("hidden");
+  els.authPassword.classList.remove("hidden");
+  els.authPassword.required = true;
   els.authError.textContent = "";
 }
 
@@ -169,7 +151,6 @@ function clearAuthFields({ keepEmail = false } = {}) {
   }
   els.authPassword.value = "";
   els.authUsername.value = "";
-  els.authResetCode.value = "";
 }
 
 function setButtonBusy(button, busy, idleText, busyText) {
@@ -598,11 +579,6 @@ function wireEvents() {
     setAuthMode(state.authMode === "login" ? "register" : "login");
   });
 
-  els.authForgot.addEventListener("click", () => {
-    clearAuthFields({ keepEmail: true });
-    setAuthMode("reset-request");
-  });
-
   els.authForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     els.authError.textContent = "";
@@ -610,46 +586,15 @@ function wireEvents() {
     const email = els.authEmail.value.trim();
     const password = els.authPassword.value;
     const username = els.authUsername.value.trim();
-    const resetCode = els.authResetCode.value.trim();
 
     try {
       const idleText = state.authMode === "register"
         ? "Create Account"
-        : state.authMode === "reset-request"
-          ? "Send Reset Code"
-          : state.authMode === "reset-confirm"
-            ? "Reset Password"
-            : "Sign In";
+        : "Sign In";
       const busyText = state.authMode === "register"
         ? "Creating..."
-        : state.authMode === "reset-request"
-          ? "Sending..."
-          : state.authMode === "reset-confirm"
-            ? "Resetting..."
-            : "Signing In...";
+        : "Signing In...";
       setButtonBusy(els.authSubmit, true, idleText, busyText);
-
-      if (state.authMode === "reset-request") {
-        const resp = await withServerWakeMessage(
-          () => window.codedApi.requestPasswordReset({ email }),
-          "Requesting a password reset code..."
-        );
-        els.authError.textContent = resp.message;
-        setAuthMode("reset-confirm");
-        els.authEmail.value = email;
-        return;
-      }
-
-      if (state.authMode === "reset-confirm") {
-        const resp = await withServerWakeMessage(
-          () => window.codedApi.resetPassword({ email, code: resetCode, password }),
-          "Updating your password..."
-        );
-        clearAuthFields({ keepEmail: true });
-        setAuthMode("login");
-        els.authError.textContent = resp.message;
-        return;
-      }
 
       const resp = state.authMode === "register"
         ? await withServerWakeMessage(
@@ -676,11 +621,7 @@ function wireEvents() {
     } finally {
       const idleText = state.authMode === "register"
         ? "Create Account"
-        : state.authMode === "reset-request"
-          ? "Send Reset Code"
-          : state.authMode === "reset-confirm"
-            ? "Reset Password"
-            : "Sign In";
+        : "Sign In";
       setButtonBusy(els.authSubmit, false, idleText, "");
     }
   });

@@ -6,17 +6,19 @@ Windows desktop chat app with account auth, friend requests, persisted 1:1 conve
 
 This project is in late beta. The desktop app, installer, multi-device chat, and hosted backend are working.
 
-Account email features depend on a configured outbound email provider:
+Email-based account features are temporarily out of scope for `v1.0.0`.
 
-- welcome email on signup
-- password reset code email
+The current public release target is focused on:
 
-If no provider is configured, the app still works for chat and account login, but email-based account recovery will be unavailable.
+- account creation and login
+- friend management
+- coded/plain-text chat
+- multi-device sync
+- Windows install experience
 
 ## Features
 
 - Email/password register + login
-- Password reset flow in the app
 - Profile updates with local image picker + avatar display
 - Friend requests by username
 - Accept incoming requests
@@ -46,7 +48,7 @@ If there is no published GitHub Release yet, the installer has not been posted p
 ## For Testers
 
 - The first request can be slow if the free cloud server is waking up.
-- Email-based account actions only work if the hosted backend has a working mail provider configured.
+- Password reset and welcome emails are not part of the current public release target.
 - Existing local-only test accounts do not automatically appear in the cloud database.
 
 ## Tech stack
@@ -57,9 +59,7 @@ If there is no published GitHub Release yet, the installer has not been posted p
   - Local mode: SQLite via `sql.js`
   - Hosted mode: Postgres
 - Auth: JWT + bcryptjs
-- Email: provider-based HTTP delivery
-  - Google Apps Script webhook
-  - Brevo API
+- Email: deferred for the current public release
 
 ## Local development
 
@@ -121,7 +121,7 @@ npm start
 - `preload.js`: Secure renderer bridge (`codedApi`, `codedMessages`)
 - `server/index.js`: Express API implementation for SQLite or Postgres
 - `server/start.js`: standalone backend entrypoint
-- `server/mailer.js`: email provider integration for welcome + password reset emails
+- `server/mailer.js`: deferred email provider integration kept for future account-email work
 - `docs/EMAIL_SETUP.md`: email provider overview and hosted setup notes
 - `docs/GOOGLE_MAIL_WEBHOOK.md`: setup guide for the Google Apps Script mail webhook
 - `renderer/index.html`: UI markup
