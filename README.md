@@ -2,15 +2,30 @@
 
 Windows desktop chat app with account auth, friend requests, persisted 1:1 conversations, coded-message display, and optional plain-text sending.
 
+## Current Status
+
+This project is in late beta. The desktop app, installer, multi-device chat, and hosted backend are working.
+
+Account email features depend on a configured outbound email provider:
+
+- welcome email on signup
+- password reset code email
+
+If no provider is configured, the app still works for chat and account login, but email-based account recovery will be unavailable.
+
 ## Features
 
 - Email/password register + login
-- Welcome email on account creation
-- Profile updates (username + profile image path)
+- Password reset flow in the app
+- Profile updates with local image picker + avatar display
 - Friend requests by username
 - Accept incoming requests
+- Decline incoming requests
+- Cancel outgoing requests
+- Remove friend
 - 1:1 conversations with persisted message history
 - Per-message send mode: `Encoded` or `Plain text`
+- Message timestamps in chat
 - Decrypter tab (paste coded text -> English)
 - Cloud-hosted backend for multi-device use
 
@@ -21,7 +36,7 @@ Use the installer from the GitHub release page, not the green `Code` button on t
 1. Open the repository on GitHub.
 2. On the right side, click `Releases`.
 3. Open the latest release.
-4. Under `Assets`, download `Coded Messages Setup 0.2.0.exe` or the newest installer version listed there.
+4. Under `Assets`, download `Coded Messages Setup 0.2.1.exe` or the newest installer version listed there.
 5. Run the installer.
 6. If Windows shows a warning, click `More info` and then `Run anyway` if you trust the release source.
 7. Finish installation and open `Coded Messages` from the Start menu or desktop shortcut.
@@ -31,7 +46,7 @@ If there is no published GitHub Release yet, the installer has not been posted p
 ## For Testers
 
 - The first request can be slow if the free cloud server is waking up.
-- Welcome emails can take a minute and may land in spam/junk.
+- Email-based account actions only work if the hosted backend has a working mail provider configured.
 - Existing local-only test accounts do not automatically appear in the cloud database.
 
 ## Tech stack
@@ -42,7 +57,9 @@ If there is no published GitHub Release yet, the installer has not been posted p
   - Local mode: SQLite via `sql.js`
   - Hosted mode: Postgres
 - Auth: JWT + bcryptjs
-- Email: Nodemailer via SMTP
+- Email: provider-based HTTP delivery
+  - Google Apps Script webhook
+  - Brevo API
 
 ## Local development
 
@@ -73,11 +90,11 @@ Useful environment variables:
 - `CODED_MESSAGES_DB_PATH`: local database file path
 - `DATABASE_URL`: Postgres connection string for hosted databases such as Supabase
 - `CODED_MESSAGES_API_BASE`: API URL the Electron app should use
-- `SMTP_HOST`: SMTP server hostname for welcome emails
-- `SMTP_PORT`: SMTP server port, usually `587` or `465`
-- `SMTP_USER`: SMTP username
-- `SMTP_PASS`: SMTP password or app password
-- `SMTP_FROM`: sender email, for example `Coded Messages <no-reply@yourdomain.com>`
+- `CODED_MESSAGES_JWT_SECRET`: JWT signing secret for the backend
+- `GOOGLE_MAIL_WEBHOOK_URL`: Google Apps Script web app URL for welcome/reset emails
+- `GOOGLE_MAIL_WEBHOOK_SECRET`: shared secret for the Google mail webhook
+- `BREVO_API_KEY`: Brevo API key (fallback/alternate provider)
+- `BREVO_FROM`: sender email, for example `Coded Messages <no-reply@yourdomain.com>`
 
 Example: run the app against an external server instead of the embedded local API:
 
@@ -91,11 +108,12 @@ npm start
 1. Create account A.
 2. Create account B.
 3. From B, send a friend request to A's username.
-4. Log into A and accept the request in `Requests`.
-5. Open the friend in `Friends` and send one `Encoded` message.
+4. Log into A and accept or decline the request in `Requests`.
+5. If accepted, open the friend in `Friends` and send one `Encoded` message.
 6. Send one `Plain text` message.
-7. Confirm both devices display each message in the selected mode.
-8. Use the `Decrypter` tab to decode pasted coded text.
+7. Confirm both devices display each message in the selected mode and show timestamps.
+8. Optionally test `Cancel` on an outgoing request and `Remove Friend` after chatting.
+9. Use the `Decrypter` tab to decode pasted coded text.
 
 ## Project structure
 
@@ -103,7 +121,9 @@ npm start
 - `preload.js`: Secure renderer bridge (`codedApi`, `codedMessages`)
 - `server/index.js`: Express API implementation for SQLite or Postgres
 - `server/start.js`: standalone backend entrypoint
-- `server/mailer.js`: SMTP mailer for welcome emails
+- `server/mailer.js`: email provider integration for welcome + password reset emails
+- `docs/EMAIL_SETUP.md`: email provider overview and hosted setup notes
+- `docs/GOOGLE_MAIL_WEBHOOK.md`: setup guide for the Google Apps Script mail webhook
 - `renderer/index.html`: UI markup
 - `renderer/styles.css`: UI styles
 - `renderer/app.js`: frontend logic
