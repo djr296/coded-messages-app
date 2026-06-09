@@ -1,6 +1,6 @@
 # Email Setup
 
-`Coded Messages` supports provider-based email delivery for:
+`Coded Messages` has optional provider-based email delivery available for future account-email features such as:
 
 - welcome email on signup
 - password reset code email
