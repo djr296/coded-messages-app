@@ -4,7 +4,7 @@ Windows desktop chat app with account auth, friend requests, persisted 1:1 conve
 
 ## Current Status
 
-This project is in late beta. The desktop app, installer, multi-device chat, and hosted backend are working.
+This project is ready for the first public `v1.0.0` Windows release. The desktop app, installer, multi-device chat, and hosted backend are working.
 
 Email-based account features are temporarily out of scope for `v1.0.0`.
 
@@ -38,7 +38,7 @@ Use the installer from the GitHub release page, not the green `Code` button on t
 1. Open the repository on GitHub.
 2. On the right side, click `Releases`.
 3. Open the latest release.
-4. Under `Assets`, download `Coded Messages Setup 0.2.1.exe` or the newest installer version listed there.
+4. Under `Assets`, download `Coded Messages Setup 1.0.0.exe` or the newest installer version listed there.
 5. Run the installer.
 6. If Windows shows a warning, click `More info` and then `Run anyway` if you trust the release source.
 7. Finish installation and open `Coded Messages` from the Start menu or desktop shortcut.
