@@ -47,7 +47,7 @@ app.whenReady().then(async () => {
   process.env.CODED_MESSAGES_API_BASE = resolvedApiBase;
 
   if (!externalApiBase && !app.isPackaged) {
-    apiServer = await createApiServer({ port: 3847 });
+    apiServer = await createApiServer({ port: 3847, allowInsecureDevJwt: true });
   }
   createWindow();
 

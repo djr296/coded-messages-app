@@ -90,7 +90,7 @@ Useful environment variables:
 - `CODED_MESSAGES_DB_PATH`: local database file path
 - `DATABASE_URL`: Postgres connection string for hosted databases such as Supabase
 - `CODED_MESSAGES_API_BASE`: API URL the Electron app should use
-- `CODED_MESSAGES_JWT_SECRET`: JWT signing secret for the backend
+- `CODED_MESSAGES_JWT_SECRET`: required JWT signing secret for standalone/hosted backend startup
 - `GOOGLE_MAIL_WEBHOOK_URL`: Google Apps Script web app URL for welcome/reset emails
 - `GOOGLE_MAIL_WEBHOOK_SECRET`: shared secret for the Google mail webhook
 - `BREVO_API_KEY`: Brevo API key (fallback/alternate provider)

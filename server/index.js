@@ -9,7 +9,20 @@ const initSqlJs = require("sql.js");
 const { Pool } = require("pg");
 const { createMailer } = require("./mailer");
 
-const JWT_SECRET = process.env.CODED_MESSAGES_JWT_SECRET || "dev-secret-change-me";
+function resolveJwtSecret({ allowInsecureDevJwt = false } = {}) {
+  const configuredSecret = String(process.env.CODED_MESSAGES_JWT_SECRET || "").trim();
+  if (configuredSecret) {
+    return configuredSecret;
+  }
+
+  if (allowInsecureDevJwt) {
+    return "dev-secret-change-me";
+  }
+
+  throw new Error(
+    "CODED_MESSAGES_JWT_SECRET is required for standalone or hosted backend startup."
+  );
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -283,7 +296,7 @@ async function createDb({ dbPath, databaseUrl }) {
   return createSqliteDb(dbPath);
 }
 
-function authMiddleware(db) {
+function authMiddleware(db, jwtSecret) {
   return async (req, res, next) => {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -293,7 +306,7 @@ function authMiddleware(db) {
     }
 
     try {
-      const decoded = jwt.verify(token, JWT_SECRET);
+      const decoded = jwt.verify(token, jwtSecret);
       const user = await db.get("SELECT * FROM users WHERE id = $id", { $id: decoded.userId });
       if (!user) {
         return res.status(401).json({ error: "Invalid token." });
@@ -306,12 +319,19 @@ function authMiddleware(db) {
   };
 }
 
-async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databaseUrl } = {}) {
+async function createApiServer({
+  host = "127.0.0.1",
+  port = 3847,
+  dbPath,
+  databaseUrl,
+  allowInsecureDevJwt = false
+} = {}) {
   const resolvedDbPath = dbPath || path.join(__dirname, "..", "data", "app.sqlite");
   if (!databaseUrl) {
     fs.mkdirSync(path.dirname(resolvedDbPath), { recursive: true });
   }
 
+  const jwtSecret = resolveJwtSecret({ allowInsecureDevJwt });
   const db = await createDb({ dbPath: resolvedDbPath, databaseUrl: databaseUrl || process.env.DATABASE_URL });
   const mailer = createMailer();
   const app = express();
@@ -368,7 +388,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
       const user = await db.get("SELECT * FROM users WHERE email = $email", { $email: email });
       await db.persist();
 
-      const token = jwt.sign({ userId: Number(user.id) }, JWT_SECRET, { expiresIn: "7d" });
+      const token = jwt.sign({ userId: Number(user.id) }, jwtSecret, { expiresIn: "7d" });
       res.json({ token, user: publicUser(user) });
 
       if (mailer.enabled) {
@@ -406,7 +426,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
         return res.status(400).json({ error: "Invalid credentials." });
       }
 
-      const token = jwt.sign({ userId: Number(user.id) }, JWT_SECRET, { expiresIn: "7d" });
+      const token = jwt.sign({ userId: Number(user.id) }, jwtSecret, { expiresIn: "7d" });
       return res.json({ token, user: publicUser(user) });
     } catch (err) {
       next(err);
@@ -521,7 +541,7 @@ async function createApiServer({ host = "127.0.0.1", port = 3847, dbPath, databa
     }
   });
 
-  const requireAuth = authMiddleware(db);
+  const requireAuth = authMiddleware(db, jwtSecret);
 
   app.get("/me", requireAuth, (req, res) => {
     res.json({ user: publicUser(req.user) });
