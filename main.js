@@ -1,9 +1,42 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const fs = require("fs");
 const path = require("path");
 const { createApiServer } = require("./server");
 
 let apiServer;
 const CLOUD_API_BASE = "https://coded-messages-api.onrender.com";
+const IMAGE_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp"
+};
+const ATTACHMENT_TYPES = {
+  ...IMAGE_TYPES,
+  ".pdf": "application/pdf",
+  ".txt": "text/plain"
+};
+
+function readFileAsDataUrl(filePath, allowedTypes, maxBytes) {
+  const extension = path.extname(filePath).toLowerCase();
+  const mimeType = allowedTypes[extension];
+  if (!mimeType) {
+    throw new Error("That file type is not supported.");
+  }
+
+  const stats = fs.statSync(filePath);
+  if (stats.size > maxBytes) {
+    throw new Error(`File is too large. Maximum size is ${Math.floor(maxBytes / 1024)} KB.`);
+  }
+
+  const data = fs.readFileSync(filePath).toString("base64");
+  return {
+    name: path.basename(filePath),
+    type: mimeType,
+    data: `data:${mimeType};base64,${data}`
+  };
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -37,7 +70,23 @@ ipcMain.handle("pick-profile-image", async () => {
     return "";
   }
 
-  return result.filePaths[0];
+  return readFileAsDataUrl(result.filePaths[0], IMAGE_TYPES, 512 * 1024).data;
+});
+
+ipcMain.handle("pick-message-attachment", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Attach a file",
+    properties: ["openFile"],
+    filters: [
+      { name: "Supported files", extensions: ["png", "jpg", "jpeg", "gif", "webp", "pdf", "txt"] }
+    ]
+  });
+
+  if (result.canceled || !result.filePaths.length) {
+    return null;
+  }
+
+  return readFileAsDataUrl(result.filePaths[0], ATTACHMENT_TYPES, 2 * 1024 * 1024);
 });
 
 app.whenReady().then(async () => {

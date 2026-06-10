@@ -12,10 +12,14 @@ const state = {
   friends: [],
   requests: [],
   outgoingRequests: [],
+  blockedUsers: [],
+  sessions: [],
   selectedConversationId: null,
   selectedUsername: "",
   messages: [],
-  messageDisplayMode: "coded"
+  messageDisplayMode: "coded",
+  pendingAttachment: null,
+  profileImageData: ""
 };
 
 const els = {
@@ -38,6 +42,8 @@ const els = {
   requestList: document.getElementById("request-list"),
   outgoingRequestList: document.getElementById("outgoing-request-list"),
   removeFriendBtn: document.getElementById("remove-friend-btn"),
+  reportUserBtn: document.getElementById("report-user-btn"),
+  blockUserBtn: document.getElementById("block-user-btn"),
 
   friendUsernameInput: document.getElementById("friend-username-input"),
   friendAddBtn: document.getElementById("friend-add-btn"),
@@ -48,6 +54,10 @@ const els = {
   messages: document.getElementById("messages"),
   sendForm: document.getElementById("send-form"),
   messageInput: document.getElementById("message-input"),
+  attachBtn: document.getElementById("attach-btn"),
+  attachmentPreview: document.getElementById("attachment-preview"),
+  attachmentName: document.getElementById("attachment-name"),
+  attachmentClear: document.getElementById("attachment-clear"),
   chatStatus: document.getElementById("chat-status"),
   messageModeCoded: document.getElementById("message-mode-coded"),
   messageModePlain: document.getElementById("message-mode-plain"),
@@ -58,9 +68,13 @@ const els = {
 
   profileForm: document.getElementById("profile-form"),
   profileUsername: document.getElementById("profile-username"),
-  profileImagePath: document.getElementById("profile-image-path"),
+  profileImagePreview: document.getElementById("profile-image-preview"),
   profileImageBrowse: document.getElementById("profile-image-browse"),
-  profileStatus: document.getElementById("profile-status")
+  profileImageClear: document.getElementById("profile-image-clear"),
+  profileStatus: document.getElementById("profile-status"),
+  sessionList: document.getElementById("session-list"),
+  sessionsRevokeOthers: document.getElementById("sessions-revoke-others"),
+  blockedUserList: document.getElementById("blocked-user-list")
 };
 
 const views = {
@@ -70,6 +84,7 @@ const views = {
 };
 
 let connectionBannerTimer = null;
+let syncTimer = null;
 
 function setView(viewName) {
   Object.entries(views).forEach(([name, el]) => {
@@ -200,6 +215,35 @@ function clearDecrypter() {
   els.decodedOutput.value = "";
 }
 
+function clearSessionState() {
+  stopBackgroundSync();
+  state.me = null;
+  state.friends = [];
+  state.requests = [];
+  state.outgoingRequests = [];
+  state.blockedUsers = [];
+  state.sessions = [];
+  state.messages = [];
+  state.selectedConversationId = null;
+  state.selectedUsername = "";
+  state.messageDisplayMode = "coded";
+  state.pendingAttachment = null;
+  state.profileImageData = "";
+  syncMessageModeControls();
+  renderAttachmentPreview();
+  setToken("");
+  clearDecrypter();
+  clearAuthFields();
+  setAuthMode("login");
+  renderCurrentUser();
+  renderFriends();
+  renderRequests();
+  renderOutgoingRequests();
+  renderBlockedUsers();
+  renderSessions();
+  renderMessages();
+}
+
 function syncMessageModeControls() {
   els.messageModeCoded.checked = state.messageDisplayMode !== "plain";
   els.messageModePlain.checked = state.messageDisplayMode === "plain";
@@ -223,12 +267,28 @@ function formatTimestamp(value) {
   }).format(date);
 }
 
+function formatPresence(user) {
+  if (user && user.online) {
+    return "Online";
+  }
+  if (user && user.last_seen_at) {
+    return `Last seen ${formatTimestamp(user.last_seen_at)}`;
+  }
+  return "Offline";
+}
+
 function getSelectedFriend() {
   if (!state.selectedConversationId) {
     return null;
   }
 
   return state.friends.find((friend) => friend.conversation_id === state.selectedConversationId) || null;
+}
+
+function renderAttachmentPreview() {
+  const attachment = state.pendingAttachment;
+  els.attachmentPreview.classList.toggle("hidden", !attachment);
+  els.attachmentName.textContent = attachment ? `${attachment.name} (${attachment.type})` : "";
 }
 
 function buildAvatar(path, label) {
@@ -258,6 +318,13 @@ function buildAvatar(path, label) {
   return wrapper;
 }
 
+function renderProfileImagePreview() {
+  els.profileImagePreview.innerHTML = "";
+  els.profileImagePreview.appendChild(
+    buildAvatar(state.profileImageData, state.me ? state.me.username : "?")
+  );
+}
+
 function renderCurrentUser() {
   if (!state.me) {
     els.currentUser.textContent = "Not signed in";
@@ -269,7 +336,12 @@ function renderCurrentUser() {
 
   const details = document.createElement("div");
   details.className = "user-summary";
-  details.innerHTML = `<strong>@${state.me.username}</strong><span>${state.me.email}</span>`;
+  const username = document.createElement("strong");
+  username.textContent = `@${state.me.username}`;
+  const email = document.createElement("span");
+  email.textContent = state.me.email;
+  details.appendChild(username);
+  details.appendChild(email);
   els.currentUser.appendChild(details);
 }
 
@@ -292,7 +364,13 @@ function renderFriends() {
 
     const details = document.createElement("div");
     details.className = "contact-summary";
-    details.innerHTML = `<strong>@${friend.username}</strong>`;
+    const username = document.createElement("strong");
+    username.textContent = `@${friend.username}`;
+    const presence = document.createElement("span");
+    presence.className = friend.online ? "presence online" : "presence";
+    presence.textContent = formatPresence(friend);
+    details.appendChild(username);
+    details.appendChild(presence);
     btn.appendChild(details);
     btn.addEventListener("click", () => {
       state.selectedConversationId = friend.conversation_id;
@@ -442,17 +520,84 @@ function renderOutgoingRequests() {
   });
 }
 
+function renderBlockedUsers() {
+  els.blockedUserList.innerHTML = "";
+  if (state.blockedUsers.length === 0) {
+    els.blockedUserList.textContent = "No blocked users.";
+    return;
+  }
+
+  state.blockedUsers.forEach((user) => {
+    const row = document.createElement("div");
+    row.className = "settings-row";
+    const label = document.createElement("span");
+    label.textContent = `@${user.username}`;
+    const button = document.createElement("button");
+    button.className = "muted-btn small";
+    button.textContent = "Unblock";
+    button.addEventListener("click", async () => {
+      try {
+        setButtonBusy(button, true, "Unblock", "Unblocking...");
+        await window.codedApi.unblockUser(state.token, user.id);
+        await refreshAccountSettings();
+      } catch (err) {
+        setProfileStatus(normalizeErrorMessage(err));
+      } finally {
+        setButtonBusy(button, false, "Unblock", "");
+      }
+    });
+    row.appendChild(label);
+    row.appendChild(button);
+    els.blockedUserList.appendChild(row);
+  });
+}
+
+function renderSessions() {
+  els.sessionList.innerHTML = "";
+  state.sessions.forEach((session) => {
+    const row = document.createElement("div");
+    row.className = "settings-row";
+    const label = document.createElement("span");
+    label.textContent = `${session.current ? "This device" : "Signed-in device"} - active ${formatTimestamp(session.last_seen_at)}`;
+    row.appendChild(label);
+
+    if (!session.current) {
+      const button = document.createElement("button");
+      button.className = "muted-btn small";
+      button.textContent = "Log Out";
+      button.addEventListener("click", async () => {
+        try {
+          setButtonBusy(button, true, "Log Out", "Logging out...");
+          await window.codedApi.revokeSession(state.token, session.id);
+          await refreshAccountSettings();
+        } catch (err) {
+          setProfileStatus(normalizeErrorMessage(err));
+        }
+      });
+      row.appendChild(button);
+    }
+    els.sessionList.appendChild(row);
+  });
+}
+
 function renderMessages() {
   els.messages.innerHTML = "";
 
   if (!state.selectedConversationId) {
     els.chatTitle.textContent = "Select a friend";
     els.removeFriendBtn.classList.add("hidden");
+    els.reportUserBtn.classList.add("hidden");
+    els.blockUserBtn.classList.add("hidden");
     return;
   }
 
-  els.chatTitle.textContent = "Chat with @" + state.selectedUsername;
+  const selectedFriend = getSelectedFriend();
+  els.chatTitle.textContent = selectedFriend
+    ? `Chat with @${state.selectedUsername} - ${formatPresence(selectedFriend)}`
+    : "Chat with @" + state.selectedUsername;
   els.removeFriendBtn.classList.remove("hidden");
+  els.reportUserBtn.classList.remove("hidden");
+  els.blockUserBtn.classList.remove("hidden");
 
   state.messages.forEach((m) => {
     const div = document.createElement("div");
@@ -461,12 +606,35 @@ function renderMessages() {
 
     const coded = document.createElement("div");
     const displayMode = m.display_mode === "plain" ? "plain" : "coded";
-    coded.textContent = displayMode === "plain" ? m.body : window.codedMessages.encode(m.body);
+    coded.textContent = m.body
+      ? displayMode === "plain"
+        ? m.body
+        : window.codedMessages.encode(m.body)
+      : "";
+
+    let attachment = null;
+    if (m.attachment_data) {
+      if (String(m.attachment_type || "").startsWith("image/")) {
+        attachment = document.createElement("img");
+        attachment.className = "message-attachment-image";
+        attachment.src = m.attachment_data;
+        attachment.alt = m.attachment_name || "Attached image";
+      } else {
+        attachment = document.createElement("a");
+        attachment.className = "message-attachment-link";
+        attachment.href = m.attachment_data;
+        attachment.download = m.attachment_name || "attachment";
+        attachment.textContent = `Download ${m.attachment_name || "attachment"}`;
+      }
+    }
 
     const meta = document.createElement("small");
-    meta.textContent = `${fromMe ? "You" : m.sender_username} • ${displayMode === "plain" ? "Plain text" : "Encoded"} • ${formatTimestamp(m.created_at)}`;
+    meta.textContent = `${fromMe ? "You" : m.sender_username} | ${displayMode === "plain" ? "Plain text" : "Encoded"} | ${formatTimestamp(m.created_at)}`;
 
     div.appendChild(coded);
+    if (attachment) {
+      div.appendChild(attachment);
+    }
     div.appendChild(meta);
     els.messages.appendChild(div);
   });
@@ -477,7 +645,8 @@ function renderMessages() {
 function fillProfileForm() {
   if (!state.me) return;
   els.profileUsername.value = state.me.username || "";
-  els.profileImagePath.value = state.me.profile_image_path || "";
+  state.profileImageData = state.me.profile_image_path || "";
+  renderProfileImagePreview();
 }
 
 async function refreshMe() {
@@ -488,6 +657,17 @@ async function refreshMe() {
   state.me = meResp.user;
   renderCurrentUser();
   fillProfileForm();
+}
+
+async function refreshAccountSettings() {
+  const [blockedResp, sessionsResp] = await Promise.all([
+    window.codedApi.getBlockedUsers(state.token),
+    window.codedApi.getSessions(state.token)
+  ]);
+  state.blockedUsers = blockedResp.blocked || [];
+  state.sessions = sessionsResp.sessions || [];
+  renderBlockedUsers();
+  renderSessions();
 }
 
 async function refreshSocialData() {
@@ -526,21 +706,78 @@ async function refreshSocialData() {
   await loadMessages();
 }
 
-async function loadMessages() {
+async function loadMessages({ silent = false } = {}) {
   if (!state.selectedConversationId) {
     state.messages = [];
     renderMessages();
     return;
   }
 
-  setChatStatus("Loading messages...");
-  const resp = await withServerWakeMessage(
-    () => window.codedApi.getMessages(state.token, state.selectedConversationId),
-    "Loading conversation from the cloud..."
-  );
+  if (!silent) {
+    setChatStatus("Loading messages...");
+  }
+  const resp = silent
+    ? await window.codedApi.getMessages(state.token, state.selectedConversationId)
+    : await withServerWakeMessage(
+        () => window.codedApi.getMessages(state.token, state.selectedConversationId),
+        "Loading conversation from the cloud..."
+      );
   state.messages = resp.messages;
-  setChatStatus("");
+  if (!silent) {
+    setChatStatus("");
+  }
   renderMessages();
+}
+
+async function backgroundSync() {
+  if (!state.token || !state.me) {
+    return;
+  }
+
+  try {
+    const [friendsResp, requestsResp] = await Promise.all([
+      window.codedApi.getFriends(state.token),
+      window.codedApi.getFriendRequests(state.token),
+      window.codedApi.heartbeat(state.token)
+    ]);
+    state.friends = friendsResp.friends || [];
+    state.requests = requestsResp.requests || [];
+    state.outgoingRequests = requestsResp.outgoing || [];
+
+    if (state.selectedConversationId) {
+      const selected = state.friends.find(
+        (friend) => friend.conversation_id === state.selectedConversationId
+      );
+      if (!selected) {
+        state.selectedConversationId = null;
+        state.selectedUsername = "";
+        state.messages = [];
+      } else {
+        state.selectedUsername = selected.username;
+      }
+    }
+
+    renderFriends();
+    renderRequests();
+    renderOutgoingRequests();
+    await loadMessages({ silent: true });
+  } catch (err) {
+    if (String(err.message || "").includes("Session expired")) {
+      clearSessionState();
+      showAuth(true);
+      els.authError.textContent = "Your session ended. Please sign in again.";
+    }
+  }
+}
+
+function startBackgroundSync() {
+  clearInterval(syncTimer);
+  syncTimer = setInterval(backgroundSync, 5000);
+}
+
+function stopBackgroundSync() {
+  clearInterval(syncTimer);
+  syncTimer = null;
 }
 
 async function bootstrap() {
@@ -559,7 +796,9 @@ async function bootstrap() {
   try {
     await refreshMe();
     await refreshSocialData();
+    await refreshAccountSettings();
     showAuth(false);
+    startBackgroundSync();
   } catch (_err) {
     setToken("");
     state.me = null;
@@ -571,7 +810,14 @@ async function bootstrap() {
 
 function wireEvents() {
   document.querySelectorAll(".menu-item").forEach((btn) => {
-    btn.addEventListener("click", () => setView(btn.dataset.view));
+    btn.addEventListener("click", () => {
+      setView(btn.dataset.view);
+      if (btn.dataset.view === "profile" && state.token) {
+        refreshAccountSettings().catch((err) => {
+          setProfileStatus(normalizeErrorMessage(err));
+        });
+      }
+    });
   });
 
   els.authSwitch.addEventListener("click", () => {
@@ -613,6 +859,8 @@ function wireEvents() {
       renderCurrentUser();
       fillProfileForm();
       await refreshSocialData();
+      await refreshAccountSettings();
+      startBackgroundSync();
 
       els.authPassword.value = "";
       setFriendStatus("");
@@ -626,25 +874,15 @@ function wireEvents() {
     }
   });
 
-  els.logoutBtn.addEventListener("click", () => {
-    state.me = null;
-    state.friends = [];
-    state.requests = [];
-    state.outgoingRequests = [];
-    state.messages = [];
-    state.selectedConversationId = null;
-    state.selectedUsername = "";
-    state.messageDisplayMode = "coded";
-    syncMessageModeControls();
-    setToken("");
-    clearDecrypter();
-    clearAuthFields();
-    setAuthMode("login");
-    renderCurrentUser();
-    renderFriends();
-    renderRequests();
-    renderOutgoingRequests();
-    renderMessages();
+  els.logoutBtn.addEventListener("click", async () => {
+    try {
+      if (state.token) {
+        await window.codedApi.logout(state.token);
+      }
+    } catch (_err) {
+      // Local logout still clears the token if the server is unavailable.
+    }
+    clearSessionState();
     showAuth(true);
   });
 
@@ -680,7 +918,7 @@ function wireEvents() {
     e.preventDefault();
     const body = els.messageInput.value.trim();
 
-    if (!body || !state.selectedConversationId) {
+    if ((!body && !state.pendingAttachment) || !state.selectedConversationId) {
       if (!state.selectedConversationId) {
         setChatStatus("Choose a friend before sending a message.");
       }
@@ -692,10 +930,18 @@ function wireEvents() {
       setButtonBusy(sendButton, true, "Send", "Sending...");
       setChatStatus(`Sending ${state.messageDisplayMode === "plain" ? "plain-text" : "encoded"} message...`);
       await withServerWakeMessage(
-        () => window.codedApi.sendMessage(state.token, state.selectedConversationId, body, state.messageDisplayMode),
+        () => window.codedApi.sendMessage(
+          state.token,
+          state.selectedConversationId,
+          body,
+          state.messageDisplayMode,
+          state.pendingAttachment
+        ),
         "Sending your message to the cloud server..."
       );
       els.messageInput.value = "";
+      state.pendingAttachment = null;
+      renderAttachmentPreview();
       await loadMessages();
       setChatStatus(`Sent as ${state.messageDisplayMode === "plain" ? "plain text" : "encoded"} text.`);
     } catch (err) {
@@ -704,6 +950,25 @@ function wireEvents() {
       const sendButton = els.sendForm.querySelector("button[type='submit']");
       setButtonBusy(sendButton, false, "Send", "");
     }
+  });
+
+  els.attachBtn.addEventListener("click", async () => {
+    try {
+      const attachment = await window.codedApi.chooseMessageAttachment();
+      if (attachment) {
+        state.pendingAttachment = attachment;
+        renderAttachmentPreview();
+        setChatStatus("Attachment ready to send.");
+      }
+    } catch (err) {
+      setChatStatus(normalizeErrorMessage(err, "Couldn't attach that file."));
+    }
+  });
+
+  els.attachmentClear.addEventListener("click", () => {
+    state.pendingAttachment = null;
+    renderAttachmentPreview();
+    setChatStatus("");
   });
 
   els.decodeBtn.addEventListener("click", () => {
@@ -720,7 +985,7 @@ function wireEvents() {
       const resp = await withServerWakeMessage(
         () => window.codedApi.updateProfile(state.token, {
           username: els.profileUsername.value.trim(),
-          profile_image_path: els.profileImagePath.value.trim()
+          profile_image_path: state.profileImageData
         }),
         "Saving your profile to the cloud..."
       );
@@ -769,15 +1034,98 @@ function wireEvents() {
     }
   });
 
+  els.blockUserBtn.addEventListener("click", async () => {
+    const selectedFriend = getSelectedFriend();
+    if (!selectedFriend) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Block @${selectedFriend.username}? This removes the friendship and shared conversation history.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setButtonBusy(els.blockUserBtn, true, "Block", "Blocking...");
+      await withServerWakeMessage(
+        () => window.codedApi.blockUser(state.token, selectedFriend.user_id),
+        "Updating your blocked users..."
+      );
+      state.selectedConversationId = null;
+      state.selectedUsername = "";
+      state.messages = [];
+      await refreshSocialData();
+      await refreshAccountSettings();
+      renderMessages();
+      setChatStatus(`Blocked @${selectedFriend.username}.`);
+    } catch (err) {
+      setChatStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.blockUserBtn, false, "Block", "");
+    }
+  });
+
+  els.reportUserBtn.addEventListener("click", async () => {
+    const selectedFriend = getSelectedFriend();
+    if (!selectedFriend) {
+      return;
+    }
+
+    const input = window.prompt(
+      `Report @${selectedFriend.username}. Enter one reason: harassment, spam, impersonation, or other.`
+    );
+    if (input === null) {
+      return;
+    }
+
+    const reason = input.trim().toLowerCase();
+    if (!["harassment", "spam", "impersonation", "other"].includes(reason)) {
+      setChatStatus("Report reason must be harassment, spam, impersonation, or other.");
+      return;
+    }
+
+    try {
+      setButtonBusy(els.reportUserBtn, true, "Report", "Reporting...");
+      await window.codedApi.reportUser(state.token, selectedFriend.user_id, reason);
+      setChatStatus(`Report submitted for @${selectedFriend.username}.`);
+    } catch (err) {
+      setChatStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.reportUserBtn, false, "Report", "");
+    }
+  });
+
   els.profileImageBrowse.addEventListener("click", async () => {
     try {
-      const selectedPath = await window.codedApi.chooseProfileImage();
-      if (selectedPath) {
-        els.profileImagePath.value = selectedPath;
+      const selectedImage = await window.codedApi.chooseProfileImage();
+      if (selectedImage) {
+        state.profileImageData = selectedImage;
+        renderProfileImagePreview();
         setProfileStatus("Profile image selected. Save profile to apply it.");
       }
     } catch (err) {
       setProfileStatus(normalizeErrorMessage(err, "Couldn't open the image picker."));
+    }
+  });
+
+  els.profileImageClear.addEventListener("click", () => {
+    state.profileImageData = "";
+    renderProfileImagePreview();
+    setProfileStatus("Profile image removed. Save profile to apply it.");
+  });
+
+  els.sessionsRevokeOthers.addEventListener("click", async () => {
+    try {
+      setButtonBusy(els.sessionsRevokeOthers, true, "Log Out Other Sessions", "Logging out...");
+      await window.codedApi.revokeOtherSessions(state.token);
+      await refreshAccountSettings();
+      setProfileStatus("Other sessions logged out.");
+    } catch (err) {
+      setProfileStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.sessionsRevokeOthers, false, "Log Out Other Sessions", "");
     }
   });
 

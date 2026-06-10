@@ -6,18 +6,25 @@
 - Express backend running locally inside app startup
 - SQLite persistence using `sql.js`
 - Register/login with email/password
-- Profile update (username, profile image path)
-- Friend requests by username + accept flow
+- Cloud-synced profile update and image picker
+- Friend requests with accept, decline, cancel, remove, block, and report controls
 - 1:1 conversation creation and message persistence
 - Coded display in chat + decrypter tab
+- Plain-text send mode and timestamps
+- Background multi-device synchronization
+- Online and last-seen presence
+- Image, PDF, and text attachments
+- Persisted sessions with remote logout
+- API rate limiting, structured logs, and health checks
+- Automated API authorization/security tests
 
 ## Next phase (recommended)
 
-1. Realtime updates with Socket.IO
-2. Add avatar file picker/upload flow (not just path)
-3. Message search and conversation previews
-4. Add real encryption under the hood (E2EE), keep coded display for shoulder-surfing
-5. Packaging and installer for distribution
+1. Add true push delivery with WebSockets instead of periodic synchronization
+2. Move attachment storage from the database to managed object storage
+3. Add message search, unread counts, and conversation previews
+4. Add an administrator workflow for reviewing user reports
+5. Add real encryption under the hood (E2EE), while keeping coded display as an optional visual mode
 
 ## Encryption recommendation
 

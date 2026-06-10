@@ -7,6 +7,7 @@
   "scripts": {
     "start": "electron .",
     "server:start": "node server/start.js",
+    "test": "node --test server/index.test.js",
     "pack": "electron-builder --dir",
     "dist:win": "electron-builder --win nsis"
   },
@@ -36,6 +37,7 @@
       "package.json",
       "renderer/**/*",
       "server/**/*",
+      "!server/**/*.test.js",
       "shared/**/*",
       "node_modules/**/*"
     ],

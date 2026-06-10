@@ -47,6 +47,18 @@ Status values:
 - [x] `PASS` Duplicate email gives a clear message
 - [x] `PASS` Duplicate username gives a clear message
 
+## Post-v1 Feature Regression
+
+- [ ] `NOT TESTED` Profile picture appears after signing in on a second device
+- [ ] `NOT TESTED` Online and last-seen presence updates
+- [ ] `NOT TESTED` Image attachment sends and appears on both devices
+- [ ] `NOT TESTED` PDF or text attachment downloads successfully
+- [ ] `NOT TESTED` Blocking removes the relationship and prevents new requests/messages
+- [ ] `NOT TESTED` Reporting submits successfully
+- [ ] `NOT TESTED` Active sessions appear and another session can be revoked
+- [ ] `NOT TESTED` Revoked session must sign in again
+- [ ] `NOT TESTED` Oversized or unsupported attachments show a clear error
+
 ## Release Gate
 
 Do not ship `v1.0.0` publicly until:

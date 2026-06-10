@@ -9,6 +9,18 @@ const initSqlJs = require("sql.js");
 const { Pool } = require("pg");
 const { createMailer } = require("./mailer");
 
+const ONLINE_WINDOW_MS = 90 * 1000;
+const MAX_AVATAR_BYTES = 512 * 1024;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const MAX_MESSAGE_CHARS = 4000;
+const MAX_USERNAME_CHARS = 32;
+const ALLOWED_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const ALLOWED_ATTACHMENT_TYPES = new Set([
+  ...ALLOWED_AVATAR_TYPES,
+  "application/pdf",
+  "text/plain"
+]);
+
 function resolveJwtSecret({ allowInsecureDevJwt = false } = {}) {
   const configuredSecret = String(process.env.CODED_MESSAGES_JWT_SECRET || "").trim();
   if (configuredSecret) {
@@ -33,11 +45,84 @@ function makePair(a, b) {
 }
 
 function publicUser(row) {
+  const lastSeenAt = row.last_seen_at || null;
   return {
     id: Number(row.id),
     email: row.email,
     username: row.username,
-    profile_image_path: row.profile_image_path || ""
+    profile_image_path: row.profile_image_path || "",
+    last_seen_at: lastSeenAt,
+    online: isRecentlyOnline(lastSeenAt)
+  };
+}
+
+function isRecentlyOnline(value) {
+  if (!value) {
+    return false;
+  }
+
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) && Date.now() - timestamp <= ONLINE_WINDOW_MS;
+}
+
+function parseDataUrl(value, { allowedTypes, maxBytes, fieldName }) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return { value: "", mimeType: "", bytes: 0 };
+  }
+
+  const match = /^data:([^;,]+);base64,([a-zA-Z0-9+/=\r\n]+)$/.exec(text);
+  if (!match) {
+    throw new Error(`${fieldName} must be a base64 data URL.`);
+  }
+
+  const mimeType = match[1].toLowerCase();
+  if (!allowedTypes.has(mimeType)) {
+    throw new Error(`${fieldName} type is not allowed.`);
+  }
+
+  const bytes = Buffer.from(match[2], "base64").length;
+  if (!bytes || bytes > maxBytes) {
+    throw new Error(`${fieldName} is too large.`);
+  }
+
+  return { value: text, mimeType, bytes };
+}
+
+function createRateLimiter({ windowMs, limit, keyPrefix }) {
+  const buckets = new Map();
+  let requestsSinceCleanup = 0;
+
+  return (req, res, next) => {
+    const now = Date.now();
+    requestsSinceCleanup += 1;
+    if (requestsSinceCleanup >= 100) {
+      requestsSinceCleanup = 0;
+      for (const [bucketKey, value] of buckets.entries()) {
+        if (value.resetAt <= now) {
+          buckets.delete(bucketKey);
+        }
+      }
+    }
+
+    const identity = req.user
+      ? `user:${req.user.id}`
+      : req.ip || req.socket.remoteAddress || "unknown";
+    const key = `${keyPrefix}:${identity}`;
+    const bucket = buckets.get(key);
+
+    if (!bucket || bucket.resetAt <= now) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    bucket.count += 1;
+    if (bucket.count > limit) {
+      res.setHeader("Retry-After", Math.ceil((bucket.resetAt - now) / 1000));
+      return res.status(429).json({ error: "Too many requests. Please wait and try again." });
+    }
+
+    return next();
   };
 }
 
@@ -125,6 +210,28 @@ async function createSqliteDb(dbPath) {
       password_hash TEXT NOT NULL,
       username TEXT NOT NULL UNIQUE,
       profile_image_path TEXT DEFAULT '',
+      last_seen_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      revoked_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS blocks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      blocker_user_id INTEGER NOT NULL,
+      blocked_user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(blocker_user_id, blocked_user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reporter_user_id INTEGER NOT NULL,
+      reported_user_id INTEGER NOT NULL,
+      reason TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS friend_requests (
@@ -158,6 +265,9 @@ async function createSqliteDb(dbPath) {
       conversation_id INTEGER NOT NULL,
       sender_id INTEGER NOT NULL,
       body TEXT NOT NULL,
+      attachment_name TEXT,
+      attachment_type TEXT,
+      attachment_data TEXT,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -171,10 +281,36 @@ async function createSqliteDb(dbPath) {
   ];
 
   createStatements.forEach((stmt) => run(stmt));
+  const userColumns = all("PRAGMA table_info(users)");
+  if (!userColumns.some((column) => String(column.name) === "last_seen_at")) {
+    run("ALTER TABLE users ADD COLUMN last_seen_at TEXT");
+  }
   const messageColumns = all("PRAGMA table_info(messages)");
   if (!messageColumns.some((column) => String(column.name) === "display_mode")) {
     run("ALTER TABLE messages ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'coded'");
   }
+  if (!messageColumns.some((column) => String(column.name) === "attachment_name")) {
+    run("ALTER TABLE messages ADD COLUMN attachment_name TEXT");
+  }
+  if (!messageColumns.some((column) => String(column.name) === "attachment_type")) {
+    run("ALTER TABLE messages ADD COLUMN attachment_type TEXT");
+  }
+  if (!messageColumns.some((column) => String(column.name) === "attachment_data")) {
+    run("ALTER TABLE messages ADD COLUMN attachment_data TEXT");
+  }
+  [
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports(reported_user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports(reporter_user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_friend_requests_to_status ON friend_requests(to_user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_friend_requests_from_status ON friend_requests(from_user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_friendships_user_a ON friendships(user_a_id)",
+    "CREATE INDEX IF NOT EXISTS idx_friendships_user_b ON friendships(user_b_id)",
+    "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)"
+  ].forEach((stmt) => run(stmt));
   persist();
 
   return {
@@ -224,6 +360,28 @@ async function createPostgresDb(databaseUrl) {
       password_hash TEXT NOT NULL,
       username TEXT NOT NULL UNIQUE,
       profile_image_path TEXT DEFAULT '',
+      last_seen_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id BIGINT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      revoked_at TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS blocks (
+      id BIGSERIAL PRIMARY KEY,
+      blocker_user_id BIGINT NOT NULL,
+      blocked_user_id BIGINT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(blocker_user_id, blocked_user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS reports (
+      id BIGSERIAL PRIMARY KEY,
+      reporter_user_id BIGINT NOT NULL,
+      reported_user_id BIGINT NOT NULL,
+      reason TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS friend_requests (
@@ -257,6 +415,9 @@ async function createPostgresDb(databaseUrl) {
       conversation_id BIGINT NOT NULL,
       sender_id BIGINT NOT NULL,
       body TEXT NOT NULL,
+      attachment_name TEXT,
+      attachment_type TEXT,
+      attachment_data TEXT,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -273,7 +434,26 @@ async function createPostgresDb(databaseUrl) {
     await run(stmt);
   }
 
+  await run("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TEXT");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_mode TEXT NOT NULL DEFAULT 'coded'");
+  await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT");
+  await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_type TEXT");
+  await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_data TEXT");
+  for (const stmt of [
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports(reported_user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_reports_reporter ON reports(reporter_user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_friend_requests_to_status ON friend_requests(to_user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_friend_requests_from_status ON friend_requests(from_user_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_friendships_user_a ON friendships(user_a_id)",
+    "CREATE INDEX IF NOT EXISTS idx_friendships_user_b ON friendships(user_b_id)",
+    "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)"
+  ]) {
+    await run(stmt);
+  }
 
   return {
     kind: "postgres",
@@ -296,6 +476,65 @@ async function createDb({ dbPath, databaseUrl }) {
   return createSqliteDb(dbPath);
 }
 
+async function issueSession(db, userId, jwtSecret) {
+  const sessionId = crypto.randomUUID();
+  const now = nowIso();
+  await db.insert(
+    "INSERT INTO sessions (id, user_id, created_at, last_seen_at, revoked_at) VALUES ($id, $userId, $createdAt, $lastSeenAt, NULL)",
+    { $id: sessionId, $userId: userId, $createdAt: now, $lastSeenAt: now }
+  );
+  await db.run("UPDATE users SET last_seen_at = $lastSeenAt WHERE id = $userId", {
+    $lastSeenAt: now,
+    $userId: userId
+  });
+  await db.persist();
+
+  return jwt.sign({ userId: Number(userId), sessionId }, jwtSecret, { expiresIn: "7d" });
+}
+
+async function usersAreBlocked(db, userA, userB) {
+  const block = await db.get(
+    `SELECT id FROM blocks
+     WHERE (blocker_user_id = $userA AND blocked_user_id = $userB)
+        OR (blocker_user_id = $userB AND blocked_user_id = $userA)
+     LIMIT 1`,
+    { $userA: userA, $userB: userB }
+  );
+  return !!block;
+}
+
+async function removeRelationship(db, userA, userB) {
+  const [a, b] = makePair(Number(userA), Number(userB));
+  const conversation = await db.get(
+    `SELECT c.id
+     FROM conversations c
+     JOIN conversation_members m1 ON m1.conversation_id = c.id AND m1.user_id = $userA
+     JOIN conversation_members m2 ON m2.conversation_id = c.id AND m2.user_id = $userB
+     LIMIT 1`,
+    { $userA: userA, $userB: userB }
+  );
+
+  await db.run("DELETE FROM friendships WHERE user_a_id = $a AND user_b_id = $b", { $a: a, $b: b });
+  await db.run(
+    `DELETE FROM friend_requests
+     WHERE (from_user_id = $userA AND to_user_id = $userB)
+        OR (from_user_id = $userB AND to_user_id = $userA)`,
+    { $userA: userA, $userB: userB }
+  );
+
+  if (conversation) {
+    await db.run("DELETE FROM messages WHERE conversation_id = $conversationId", {
+      $conversationId: conversation.id
+    });
+    await db.run("DELETE FROM conversation_members WHERE conversation_id = $conversationId", {
+      $conversationId: conversation.id
+    });
+    await db.run("DELETE FROM conversations WHERE id = $conversationId", {
+      $conversationId: conversation.id
+    });
+  }
+}
+
 function authMiddleware(db, jwtSecret) {
   return async (req, res, next) => {
     const authHeader = req.headers.authorization || "";
@@ -307,11 +546,37 @@ function authMiddleware(db, jwtSecret) {
 
     try {
       const decoded = jwt.verify(token, jwtSecret);
+      if (!decoded.sessionId) {
+        return res.status(401).json({ error: "Session expired. Please sign in again." });
+      }
+
+      const session = await db.get(
+        "SELECT * FROM sessions WHERE id = $id AND user_id = $userId AND revoked_at IS NULL",
+        { $id: decoded.sessionId, $userId: decoded.userId }
+      );
+      if (!session) {
+        return res.status(401).json({ error: "Session expired. Please sign in again." });
+      }
+
       const user = await db.get("SELECT * FROM users WHERE id = $id", { $id: decoded.userId });
       if (!user) {
         return res.status(401).json({ error: "Invalid token." });
       }
+      const lastSeenMs = new Date(session.last_seen_at).getTime();
+      if (!Number.isFinite(lastSeenMs) || Date.now() - lastSeenMs >= 15 * 1000) {
+        const now = nowIso();
+        await db.run("UPDATE sessions SET last_seen_at = $now WHERE id = $id", {
+          $now: now,
+          $id: decoded.sessionId
+        });
+        await db.run("UPDATE users SET last_seen_at = $now WHERE id = $userId", {
+          $now: now,
+          $userId: decoded.userId
+        });
+        user.last_seen_at = now;
+      }
       req.user = user;
+      req.session = session;
       next();
     } catch (_err) {
       return res.status(401).json({ error: "Invalid token." });
@@ -335,20 +600,47 @@ async function createApiServer({
   const db = await createDb({ dbPath: resolvedDbPath, databaseUrl: databaseUrl || process.env.DATABASE_URL });
   const mailer = createMailer();
   const app = express();
+  const authLimiter = createRateLimiter({ windowMs: 15 * 60 * 1000, limit: 20, keyPrefix: "auth" });
+  const socialLimiter = createRateLimiter({ windowMs: 60 * 1000, limit: 60, keyPrefix: "social" });
+  const messageLimiter = createRateLimiter({ windowMs: 60 * 1000, limit: 120, keyPrefix: "message" });
 
+  app.set("trust proxy", 1);
   app.use(cors());
-  app.use(express.json());
-
-  app.get("/health", (_req, res) => {
-    res.json({
-      ok: true,
-      database: db.kind,
-      mailer: mailer.provider,
-      mailConfigured: mailer.enabled
+  app.use(express.json({ limit: "4mb" }));
+  app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const requestId = crypto.randomUUID();
+    res.setHeader("X-Request-Id", requestId);
+    res.on("finish", () => {
+      console.log(JSON.stringify({
+        level: "info",
+        event: "http_request",
+        requestId,
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+        durationMs: Date.now() - startedAt
+      }));
     });
+    next();
   });
 
-  app.post("/auth/register", async (req, res, next) => {
+  app.get("/health", async (_req, res, next) => {
+    try {
+      await db.get("SELECT 1 AS ok");
+      res.json({
+        ok: true,
+        database: db.kind,
+        databaseConnected: true,
+        mailer: mailer.provider,
+        mailConfigured: mailer.enabled
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/auth/register", authLimiter, async (req, res, next) => {
     try {
       const email = String(req.body.email || "").trim().toLowerCase();
       const password = String(req.body.password || "");
@@ -364,6 +656,9 @@ async function createApiServer({
 
       if (!username) {
         username = email.split("@")[0];
+      }
+      if (username.length > MAX_USERNAME_CHARS) {
+        return res.status(400).json({ error: `Username must be ${MAX_USERNAME_CHARS} characters or fewer.` });
       }
 
       const existingEmail = await db.get("SELECT id FROM users WHERE email = $email", { $email: email });
@@ -388,7 +683,7 @@ async function createApiServer({
       const user = await db.get("SELECT * FROM users WHERE email = $email", { $email: email });
       await db.persist();
 
-      const token = jwt.sign({ userId: Number(user.id) }, jwtSecret, { expiresIn: "7d" });
+      const token = await issueSession(db, user.id, jwtSecret);
       res.json({ token, user: publicUser(user) });
 
       if (mailer.enabled) {
@@ -411,7 +706,7 @@ async function createApiServer({
     }
   });
 
-  app.post("/auth/login", async (req, res, next) => {
+  app.post("/auth/login", authLimiter, async (req, res, next) => {
     try {
       const email = String(req.body.email || "").trim().toLowerCase();
       const password = String(req.body.password || "");
@@ -426,14 +721,14 @@ async function createApiServer({
         return res.status(400).json({ error: "Invalid credentials." });
       }
 
-      const token = jwt.sign({ userId: Number(user.id) }, jwtSecret, { expiresIn: "7d" });
+      const token = await issueSession(db, user.id, jwtSecret);
       return res.json({ token, user: publicUser(user) });
     } catch (err) {
       next(err);
     }
   });
 
-  app.post("/auth/request-password-reset", async (req, res, next) => {
+  app.post("/auth/request-password-reset", authLimiter, async (req, res, next) => {
     try {
       const email = String(req.body.email || "").trim().toLowerCase();
       if (!email) {
@@ -488,7 +783,7 @@ async function createApiServer({
     }
   });
 
-  app.post("/auth/reset-password", async (req, res, next) => {
+  app.post("/auth/reset-password", authLimiter, async (req, res, next) => {
     try {
       const email = String(req.body.email || "").trim().toLowerCase();
       const code = String(req.body.code || "").trim();
@@ -533,6 +828,10 @@ async function createApiServer({
         "UPDATE password_reset_tokens SET used_at = $usedAt WHERE user_id = $userId AND used_at IS NULL AND id != $id",
         { $usedAt: now, $userId: user.id, $id: resetToken.id }
       );
+      await db.run(
+        "UPDATE sessions SET revoked_at = $revokedAt WHERE user_id = $userId AND revoked_at IS NULL",
+        { $revokedAt: now, $userId: user.id }
+      );
       await db.persist();
 
       return res.json({ ok: true, message: "Password updated. You can sign in now." });
@@ -547,6 +846,79 @@ async function createApiServer({
     res.json({ user: publicUser(req.user) });
   });
 
+  app.post("/me/heartbeat", requireAuth, (req, res) => {
+    res.json({ ok: true, last_seen_at: req.user.last_seen_at });
+  });
+
+  app.post("/auth/logout", requireAuth, async (req, res, next) => {
+    try {
+      await db.run("UPDATE sessions SET revoked_at = $revokedAt WHERE id = $id", {
+        $revokedAt: nowIso(),
+        $id: req.session.id
+      });
+      await db.persist();
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/sessions", requireAuth, async (req, res, next) => {
+    try {
+      const sessions = await db.all(
+        `SELECT id, created_at, last_seen_at
+         FROM sessions
+         WHERE user_id = $userId AND revoked_at IS NULL
+         ORDER BY last_seen_at DESC`,
+        { $userId: req.user.id }
+      );
+      res.json({
+        sessions: sessions.map((session) => ({
+          id: session.id,
+          created_at: session.created_at,
+          last_seen_at: session.last_seen_at,
+          current: session.id === req.session.id
+        }))
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.delete("/sessions/:id", requireAuth, async (req, res, next) => {
+    try {
+      const session = await db.get(
+        "SELECT id FROM sessions WHERE id = $id AND user_id = $userId AND revoked_at IS NULL",
+        { $id: req.params.id, $userId: req.user.id }
+      );
+      if (!session) {
+        return res.status(404).json({ error: "Session not found." });
+      }
+
+      await db.run("UPDATE sessions SET revoked_at = $revokedAt WHERE id = $id", {
+        $revokedAt: nowIso(),
+        $id: session.id
+      });
+      await db.persist();
+      return res.json({ ok: true });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.delete("/sessions", requireAuth, async (req, res, next) => {
+    try {
+      await db.run(
+        "UPDATE sessions SET revoked_at = $revokedAt WHERE user_id = $userId AND id != $currentId AND revoked_at IS NULL",
+        { $revokedAt: nowIso(), $userId: req.user.id, $currentId: req.session.id }
+      );
+      await db.persist();
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.patch("/me/profile", requireAuth, async (req, res, next) => {
     try {
       const username = String(req.body.username || "").trim();
@@ -554,6 +926,21 @@ async function createApiServer({
 
       if (!username) {
         return res.status(400).json({ error: "Username is required." });
+      }
+      if (username.length > MAX_USERNAME_CHARS) {
+        return res.status(400).json({ error: `Username must be ${MAX_USERNAME_CHARS} characters or fewer.` });
+      }
+
+      if (profileImagePath) {
+        try {
+          parseDataUrl(profileImagePath, {
+            allowedTypes: ALLOWED_AVATAR_TYPES,
+            maxBytes: MAX_AVATAR_BYTES,
+            fieldName: "Profile image"
+          });
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
       }
 
       const duplicate = await db.get(
@@ -578,7 +965,112 @@ async function createApiServer({
     }
   });
 
-  app.post("/friends/request", requireAuth, async (req, res, next) => {
+  app.get("/blocks", requireAuth, async (req, res, next) => {
+    try {
+      const blocked = await db.all(
+        `SELECT u.id, u.username, u.profile_image_path, b.created_at
+         FROM blocks b
+         JOIN users u ON u.id = b.blocked_user_id
+         WHERE b.blocker_user_id = $me
+         ORDER BY lower(u.username)`,
+        { $me: req.user.id }
+      );
+      res.json({
+        blocked: blocked.map((user) => ({
+          id: Number(user.id),
+          username: user.username,
+          profile_image_path: user.profile_image_path || "",
+          created_at: user.created_at
+        }))
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/blocks/:userId", requireAuth, socialLimiter, async (req, res, next) => {
+    try {
+      const blockedUserId = Number(req.params.userId);
+      if (!blockedUserId || blockedUserId === Number(req.user.id)) {
+        return res.status(400).json({ error: "Invalid user to block." });
+      }
+
+      const user = await db.get("SELECT id FROM users WHERE id = $id", { $id: blockedUserId });
+      if (!user) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      const existing = await db.get(
+        "SELECT id FROM blocks WHERE blocker_user_id = $blocker AND blocked_user_id = $blocked",
+        { $blocker: req.user.id, $blocked: blockedUserId }
+      );
+      if (!existing) {
+        await db.insert(
+          "INSERT INTO blocks (blocker_user_id, blocked_user_id, created_at) VALUES ($blocker, $blocked, $createdAt)",
+          { $blocker: req.user.id, $blocked: blockedUserId, $createdAt: nowIso() }
+        );
+      }
+
+      await removeRelationship(db, req.user.id, blockedUserId);
+      await db.persist();
+      return res.json({ ok: true });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.delete("/blocks/:userId", requireAuth, async (req, res, next) => {
+    try {
+      const blockedUserId = Number(req.params.userId);
+      await db.run(
+        "DELETE FROM blocks WHERE blocker_user_id = $blocker AND blocked_user_id = $blocked",
+        { $blocker: req.user.id, $blocked: blockedUserId }
+      );
+      await db.persist();
+      res.json({ ok: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/reports/:userId", requireAuth, socialLimiter, async (req, res, next) => {
+    try {
+      const reportedUserId = Number(req.params.userId);
+      const allowedReasons = new Set(["harassment", "spam", "impersonation", "other"]);
+      const reason = String(req.body.reason || "").trim().toLowerCase();
+
+      if (!reportedUserId || reportedUserId === Number(req.user.id)) {
+        return res.status(400).json({ error: "Invalid user to report." });
+      }
+      if (!allowedReasons.has(reason)) {
+        return res.status(400).json({ error: "Choose a valid report reason." });
+      }
+
+      const reportedUser = await db.get("SELECT id FROM users WHERE id = $id", {
+        $id: reportedUserId
+      });
+      if (!reportedUser) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      await db.insert(
+        `INSERT INTO reports (reporter_user_id, reported_user_id, reason, created_at)
+         VALUES ($reporterUserId, $reportedUserId, $reason, $createdAt)`,
+        {
+          $reporterUserId: req.user.id,
+          $reportedUserId: reportedUserId,
+          $reason: reason,
+          $createdAt: nowIso()
+        }
+      );
+      await db.persist();
+      return res.json({ ok: true });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.post("/friends/request", requireAuth, socialLimiter, async (req, res, next) => {
     try {
       const username = String(req.body.username || "").trim();
       if (!username) {
@@ -594,6 +1086,10 @@ async function createApiServer({
 
       if (Number(target.id) === Number(req.user.id)) {
         return res.status(400).json({ error: "You cannot friend yourself." });
+      }
+
+      if (await usersAreBlocked(db, req.user.id, target.id)) {
+        return res.status(403).json({ error: "Friend requests are unavailable between these accounts." });
       }
 
       const [a, b] = makePair(Number(req.user.id), Number(target.id));
@@ -648,6 +1144,11 @@ async function createApiServer({
          FROM friend_requests fr
          JOIN users u ON u.id = fr.from_user_id
          WHERE fr.to_user_id = $me AND fr.status = 'pending'
+           AND NOT EXISTS (
+             SELECT 1 FROM blocks b
+             WHERE (b.blocker_user_id = $me AND b.blocked_user_id = fr.from_user_id)
+                OR (b.blocker_user_id = fr.from_user_id AND b.blocked_user_id = $me)
+           )
          ORDER BY fr.created_at DESC`,
         { $me: req.user.id }
       );
@@ -657,6 +1158,11 @@ async function createApiServer({
          FROM friend_requests fr
          JOIN users u ON u.id = fr.to_user_id
          WHERE fr.from_user_id = $me AND fr.status = 'pending'
+           AND NOT EXISTS (
+             SELECT 1 FROM blocks b
+             WHERE (b.blocker_user_id = $me AND b.blocked_user_id = fr.to_user_id)
+                OR (b.blocker_user_id = fr.to_user_id AND b.blocked_user_id = $me)
+           )
          ORDER BY fr.created_at DESC`,
         { $me: req.user.id }
       );
@@ -682,7 +1188,7 @@ async function createApiServer({
     }
   });
 
-  app.post("/friends/request/:id/accept", requireAuth, async (req, res, next) => {
+  app.post("/friends/request/:id/accept", requireAuth, socialLimiter, async (req, res, next) => {
     try {
       const requestId = Number(req.params.id);
       if (!requestId) {
@@ -696,6 +1202,10 @@ async function createApiServer({
 
       if (request.status !== "pending") {
         return res.status(400).json({ error: "Request is not pending." });
+      }
+
+      if (await usersAreBlocked(db, request.from_user_id, request.to_user_id)) {
+        return res.status(403).json({ error: "This request can no longer be accepted." });
       }
 
       const [a, b] = makePair(Number(request.from_user_id), Number(request.to_user_id));
@@ -743,7 +1253,7 @@ async function createApiServer({
     }
   });
 
-  app.post("/friends/request/:id/decline", requireAuth, async (req, res, next) => {
+  app.post("/friends/request/:id/decline", requireAuth, socialLimiter, async (req, res, next) => {
     try {
       const requestId = Number(req.params.id);
       if (!requestId) {
@@ -770,7 +1280,7 @@ async function createApiServer({
     }
   });
 
-  app.post("/friends/request/:id/cancel", requireAuth, async (req, res, next) => {
+  app.post("/friends/request/:id/cancel", requireAuth, socialLimiter, async (req, res, next) => {
     try {
       const requestId = Number(req.params.id);
       if (!requestId) {
@@ -803,11 +1313,17 @@ async function createApiServer({
         `SELECT f.id AS friendship_id,
                 CASE WHEN f.user_a_id = $me THEN u2.id ELSE u1.id END AS user_id,
                 CASE WHEN f.user_a_id = $me THEN u2.username ELSE u1.username END AS username,
-                CASE WHEN f.user_a_id = $me THEN u2.profile_image_path ELSE u1.profile_image_path END AS profile_image_path
+                CASE WHEN f.user_a_id = $me THEN u2.profile_image_path ELSE u1.profile_image_path END AS profile_image_path,
+                CASE WHEN f.user_a_id = $me THEN u2.last_seen_at ELSE u1.last_seen_at END AS last_seen_at
          FROM friendships f
          JOIN users u1 ON u1.id = f.user_a_id
          JOIN users u2 ON u2.id = f.user_b_id
-         WHERE f.user_a_id = $me OR f.user_b_id = $me
+         WHERE (f.user_a_id = $me OR f.user_b_id = $me)
+           AND NOT EXISTS (
+             SELECT 1 FROM blocks b
+             WHERE (b.blocker_user_id = $me AND b.blocked_user_id = CASE WHEN f.user_a_id = $me THEN f.user_b_id ELSE f.user_a_id END)
+                OR (b.blocked_user_id = $me AND b.blocker_user_id = CASE WHEN f.user_a_id = $me THEN f.user_b_id ELSE f.user_a_id END)
+           )
          ORDER BY lower(CASE WHEN f.user_a_id = $me THEN u2.username ELSE u1.username END)`,
         { $me: req.user.id }
       );
@@ -828,6 +1344,8 @@ async function createApiServer({
           user_id: Number(row.user_id),
           username: row.username,
           profile_image_path: row.profile_image_path || "",
+          last_seen_at: row.last_seen_at || null,
+          online: isRecentlyOnline(row.last_seen_at),
           conversation_id: convo ? Number(convo.id) : null
         });
       }
@@ -891,6 +1409,17 @@ async function createApiServer({
       { $c: conversationId, $u: userId }
     );
     return !!row;
+  }
+
+  async function getConversationPeer(userId, conversationId) {
+    return db.get(
+      `SELECT u.id, u.username
+       FROM conversation_members cm
+       JOIN users u ON u.id = cm.user_id
+       WHERE cm.conversation_id = $conversationId AND cm.user_id != $userId
+       LIMIT 1`,
+      { $conversationId: conversationId, $userId: userId }
+    );
   }
 
   app.get("/conversations", requireAuth, async (req, res, next) => {
@@ -958,9 +1487,16 @@ async function createApiServer({
         return res.status(403).json({ error: "Not a conversation member." });
       }
 
+      const peer = await getConversationPeer(req.user.id, conversationId);
+      if (!peer || await usersAreBlocked(db, req.user.id, peer.id)) {
+        return res.status(403).json({ error: "This conversation is unavailable." });
+      }
+
       const messages = (
         await db.all(
-          `SELECT m.id, m.sender_id, m.body, m.created_at, m.display_mode, u.username AS sender_username
+          `SELECT m.id, m.sender_id, m.body, m.created_at, m.display_mode,
+                  m.attachment_name, m.attachment_type, m.attachment_data,
+                  u.username AS sender_username
            FROM messages m
            JOIN users u ON u.id = m.sender_id
            WHERE m.conversation_id = $c
@@ -973,6 +1509,9 @@ async function createApiServer({
         sender_username: m.sender_username,
         body: m.body,
         display_mode: normalizeMessageDisplayMode(m.display_mode),
+        attachment_name: m.attachment_name || "",
+        attachment_type: m.attachment_type || "",
+        attachment_data: m.attachment_data || "",
         created_at: m.created_at
       }));
 
@@ -982,29 +1521,70 @@ async function createApiServer({
     }
   });
 
-  app.post("/conversations/:id/messages", requireAuth, async (req, res, next) => {
+  app.post("/conversations/:id/messages", requireAuth, messageLimiter, async (req, res, next) => {
     try {
       const conversationId = Number(req.params.id);
       const body = String(req.body.body || "").trim();
       const displayMode = normalizeMessageDisplayMode(req.body.display_mode);
+      const attachmentName = String(req.body.attachment_name || "").trim().slice(0, 180);
+      const attachmentData = String(req.body.attachment_data || "").trim();
 
-      if (!conversationId || !body) {
-        return res.status(400).json({ error: "Conversation id and body are required." });
+      if (!conversationId || (!body && !attachmentData)) {
+        return res.status(400).json({ error: "A message or attachment is required." });
+      }
+      if (body.length > MAX_MESSAGE_CHARS) {
+        return res.status(400).json({ error: `Messages must be ${MAX_MESSAGE_CHARS} characters or fewer.` });
       }
 
       if (!(await isConversationMember(req.user.id, conversationId))) {
         return res.status(403).json({ error: "Not a conversation member." });
       }
 
+      const peer = await getConversationPeer(req.user.id, conversationId);
+      if (!peer || await usersAreBlocked(db, req.user.id, peer.id)) {
+        return res.status(403).json({ error: "Messages are unavailable between these accounts." });
+      }
+
+      let attachment = { value: "", mimeType: "" };
+      if (attachmentData) {
+        try {
+          attachment = parseDataUrl(attachmentData, {
+            allowedTypes: ALLOWED_ATTACHMENT_TYPES,
+            maxBytes: MAX_ATTACHMENT_BYTES,
+            fieldName: "Attachment"
+          });
+        } catch (err) {
+          return res.status(400).json({ error: err.message });
+        }
+      }
+
       const row = await db.insert(
-        "INSERT INTO messages (conversation_id, sender_id, body, created_at, display_mode) VALUES ($c, $s, $b, $created, $displayMode)",
-        { $c: conversationId, $s: req.user.id, $b: body, $created: nowIso(), $displayMode: displayMode }
+        `INSERT INTO messages (
+          conversation_id, sender_id, body, created_at, display_mode,
+          attachment_name, attachment_type, attachment_data
+        ) VALUES (
+          $conversationId, $senderId, $body, $createdAt, $displayMode,
+          $attachmentName, $attachmentType, $attachmentData
+        )`,
+        {
+          $conversationId: conversationId,
+          $senderId: req.user.id,
+          $body: body,
+          $createdAt: nowIso(),
+          $displayMode: displayMode,
+          $attachmentName: attachment.value ? attachmentName || "attachment" : null,
+          $attachmentType: attachment.mimeType || null,
+          $attachmentData: attachment.value || null
+        }
       );
       await db.persist();
 
-      const inserted = await db.get("SELECT id, sender_id, body, created_at, display_mode FROM messages WHERE id = $id", {
-        $id: row.id
-      });
+      const inserted = await db.get(
+        `SELECT id, sender_id, body, created_at, display_mode,
+                attachment_name, attachment_type, attachment_data
+         FROM messages WHERE id = $id`,
+        { $id: row.id }
+      );
 
       res.json({
         message: {
@@ -1012,6 +1592,9 @@ async function createApiServer({
           sender_id: Number(inserted.sender_id),
           body: inserted.body,
           display_mode: normalizeMessageDisplayMode(inserted.display_mode),
+          attachment_name: inserted.attachment_name || "",
+          attachment_type: inserted.attachment_type || "",
+          attachment_data: inserted.attachment_data || "",
           created_at: inserted.created_at
         }
       });
@@ -1028,10 +1611,12 @@ async function createApiServer({
   const server = await new Promise((resolve) => {
     const instance = app.listen(port, host, () => resolve(instance));
   });
+  const address = server.address();
+  const actualPort = address && typeof address === "object" ? address.port : port;
 
   return {
     host,
-    port,
+    port: actualPort,
     dbPath: db.kind === "sqlite" ? resolvedDbPath : null,
     databaseKind: db.kind,
     mailerProvider: mailer.provider,

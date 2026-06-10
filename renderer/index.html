@@ -85,14 +85,23 @@
           <header class="view-header">
             <div class="chat-header-row">
               <h1 id="chat-title">Select a friend</h1>
-              <button id="remove-friend-btn" class="muted-btn small hidden" type="button">Remove Friend</button>
+              <div class="chat-header-actions">
+                <button id="report-user-btn" class="muted-btn small hidden" type="button">Report</button>
+                <button id="block-user-btn" class="danger-btn small hidden" type="button">Block</button>
+                <button id="remove-friend-btn" class="muted-btn small hidden" type="button">Remove Friend</button>
+              </div>
             </div>
           </header>
           <div id="messages" class="messages"></div>
           <form id="send-form" class="composer">
             <input id="message-input" type="text" placeholder="Type message in English..." />
+            <button id="attach-btn" type="button" class="muted-btn">Attach</button>
             <button type="submit">Send</button>
           </form>
+          <div id="attachment-preview" class="attachment-preview hidden">
+            <span id="attachment-name"></span>
+            <button id="attachment-clear" type="button" class="muted-btn small">Remove</button>
+          </div>
           <div class="send-mode-panel">
             <div class="send-mode-copy">
               <strong>Send mode</strong>
@@ -131,15 +140,31 @@
             <label for="profile-username">Username</label>
             <input id="profile-username" type="text" required />
 
-            <label for="profile-image-path">Profile image path</label>
-            <div class="profile-image-row">
-              <input id="profile-image-path" type="text" placeholder="C:\\Users\\you\\Pictures\\avatar.png" />
-              <button id="profile-image-browse" type="button" class="muted-btn small">Browse...</button>
+            <label>Profile picture</label>
+            <div class="profile-image-editor">
+              <div id="profile-image-preview"></div>
+              <div class="profile-image-actions">
+                <button id="profile-image-browse" type="button" class="muted-btn small">Choose Image</button>
+                <button id="profile-image-clear" type="button" class="muted-btn small">Remove Image</button>
+              </div>
             </div>
 
             <button type="submit">Save Profile</button>
             <p id="profile-status" class="status"></p>
           </form>
+
+          <section class="profile-section">
+            <div class="section-heading">
+              <h2>Active Sessions</h2>
+              <button id="sessions-revoke-others" type="button" class="muted-btn small">Log Out Other Sessions</button>
+            </div>
+            <div id="session-list" class="settings-list"></div>
+          </section>
+
+          <section class="profile-section">
+            <h2>Blocked Users</h2>
+            <div id="blocked-user-list" class="settings-list"></div>
+          </section>
         </section>
       </main>
     </div>

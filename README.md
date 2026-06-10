@@ -1,6 +1,6 @@
 # Coded Messages App
 
-Windows desktop chat app with account auth, friend requests, persisted 1:1 conversations, coded-message display, and optional plain-text sending.
+Windows desktop chat app with account auth, friend requests, persisted 1:1 conversations, coded-message display, optional plain-text sending, profiles, presence, and file attachments.
 
 ## Current Status
 
@@ -28,8 +28,15 @@ The current public release target is focused on:
 - 1:1 conversations with persisted message history
 - Per-message send mode: `Encoded` or `Plain text`
 - Message timestamps in chat
+- Background multi-device message synchronization
+- Online and last-seen presence
+- Cloud-synced profile pictures
+- Image, PDF, and text-file attachments
+- Block and report controls
+- Active-session management and remote logout
 - Decrypter tab (paste coded text -> English)
 - Cloud-hosted backend for multi-device use
+- API rate limits, structured request logs, and database health checks
 
 ## Download For Windows
 
@@ -50,6 +57,7 @@ If there is no published GitHub Release yet, the installer has not been posted p
 - The first request can be slow if the free cloud server is waking up.
 - Password reset and welcome emails are not part of the current public release target.
 - Existing local-only test accounts do not automatically appear in the cloud database.
+- Attachments are limited to supported image formats, PDF, or plain text and a maximum of 2 MB.
 
 ## Tech stack
 
@@ -66,6 +74,7 @@ If there is no published GitHub Release yet, the installer has not been posted p
 - `main.js`: Electron main process + local API startup when not using a hosted backend
 - `preload.js`: Secure renderer bridge (`codedApi`, `codedMessages`)
 - `server/index.js`: Express API implementation for SQLite or Postgres
+- `server/index.test.js`: automated API authorization and security regression tests
 - `server/start.js`: standalone backend entrypoint
 - `server/mailer.js`: deferred email provider integration kept for future account-email work
 - `docs/EMAIL_SETUP.md`: email provider overview and hosted setup notes
