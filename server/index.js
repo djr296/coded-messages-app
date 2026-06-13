@@ -434,6 +434,23 @@ async function createPostgresDb(databaseUrl) {
     await run(stmt);
   }
 
+  // Render connects as the table owner and continues to use these tables.
+  // RLS default-denies access through Supabase's exposed anon/authenticated API.
+  for (const table of [
+    "users",
+    "sessions",
+    "blocks",
+    "reports",
+    "friend_requests",
+    "friendships",
+    "conversations",
+    "conversation_members",
+    "messages",
+    "password_reset_tokens"
+  ]) {
+    await run(`ALTER TABLE public.${table} ENABLE ROW LEVEL SECURITY`);
+  }
+
   await run("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TEXT");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_mode TEXT NOT NULL DEFAULT 'coded'");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT");
