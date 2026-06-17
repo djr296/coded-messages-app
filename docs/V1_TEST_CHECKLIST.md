@@ -59,6 +59,8 @@ Status values:
 - [ ] `NOT TESTED` Revoked session must sign in again
 - [ ] `NOT TESTED` Oversized or unsupported attachments show a clear error
 - [ ] `NOT TESTED` Create a group chat with existing friends
+- [ ] `NOT TESTED` Group creator can create and copy a 24-hour invite link
+- [ ] `NOT TESTED` A signed-in user can join a group with a valid invite link
 - [ ] `NOT TESTED` Send a group message and confirm all members can read it
 - [ ] `NOT TESTED` Leave a group and confirm it disappears from that account
 

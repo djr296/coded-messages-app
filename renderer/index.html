@@ -72,6 +72,13 @@
         </section>
 
         <section class="side-section">
+          <h3>Join Group</h3>
+          <input id="group-invite-input" type="text" placeholder="Paste invite link or code" />
+          <button id="group-join-btn" class="small" type="button">Join</button>
+          <p id="group-join-status" class="status"></p>
+        </section>
+
+        <section class="side-section">
           <h3>Requests</h3>
           <div id="request-list" class="request-list"></div>
         </section>
@@ -96,6 +103,7 @@
               <div class="chat-header-actions">
                 <button id="report-user-btn" class="muted-btn small hidden" type="button">Report</button>
                 <button id="block-user-btn" class="danger-btn small hidden" type="button">Block</button>
+                <button id="group-invite-btn" class="muted-btn small hidden" type="button">Invite Link</button>
                 <button id="leave-group-btn" class="muted-btn small hidden" type="button">Leave Group</button>
                 <button id="remove-friend-btn" class="muted-btn small hidden" type="button">Remove Friend</button>
               </div>

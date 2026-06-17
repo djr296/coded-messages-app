@@ -168,6 +168,35 @@ test("authorization, blocking, attachments, and sessions", async (t) => {
   );
   assert.equal(charlieGroupRead.status, 403);
 
+  const groupInvite = await request(baseUrl, `/conversations/${group.payload.conversation_id}/invites`, {
+    method: "POST",
+    token: alice.token
+  });
+  assert.equal(groupInvite.status, 200);
+  assert.ok(groupInvite.payload.token);
+  assert.ok(groupInvite.payload.expires_at);
+
+  const inviteLookup = await request(baseUrl, `/group-invites/${groupInvite.payload.token}`, {
+    token: charlie.token
+  });
+  assert.equal(inviteLookup.status, 200);
+  assert.equal(inviteLookup.payload.invite.title, "Launch Crew");
+  assert.equal(inviteLookup.payload.invite.already_member, false);
+
+  const inviteJoin = await request(baseUrl, `/group-invites/${groupInvite.payload.token}/join`, {
+    method: "POST",
+    token: charlie.token
+  });
+  assert.equal(inviteJoin.status, 200);
+  assert.equal(inviteJoin.payload.conversation_id, group.payload.conversation_id);
+
+  const charlieGroupReadAfterJoin = await request(
+    baseUrl,
+    `/conversations/${group.payload.conversation_id}/messages`,
+    { token: charlie.token }
+  );
+  assert.equal(charlieGroupReadAfterJoin.status, 200);
+
   const report = await request(baseUrl, `/reports/${bob.user.id}`, {
     method: "POST",
     token: alice.token,

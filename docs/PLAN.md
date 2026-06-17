@@ -10,6 +10,7 @@
 - Friend requests with accept, decline, cancel, remove, block, and report controls
 - 1:1 conversation creation and message persistence
 - Group chat creation with friend invites
+- 24-hour group invite links
 - Coded display in chat + decrypter tab
 - Plain-text send mode and timestamps
 - Background multi-device synchronization
@@ -22,11 +23,12 @@
 ## Next phase (recommended)
 
 1. Add group member management after creation
-2. Add true push delivery with WebSockets instead of periodic synchronization
-3. Move attachment storage from the database to managed object storage
-4. Add message search, unread counts, and conversation previews
-5. Add an administrator workflow for reviewing user reports
-6. Add real encryption under the hood (E2EE), while keeping coded display as an optional visual mode
+2. Add OS-level handling for `codedmessages://group/...` invite links
+3. Add true push delivery with WebSockets instead of periodic synchronization
+4. Move attachment storage from the database to managed object storage
+5. Add message search, unread counts, and conversation previews
+6. Add an administrator workflow for reviewing user reports
+7. Add real encryption under the hood (E2EE), while keeping coded display as an optional visual mode
 
 ## Encryption recommendation
 

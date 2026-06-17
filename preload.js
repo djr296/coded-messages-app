@@ -59,6 +59,11 @@ contextBridge.exposeInMainWorld("codedApi", {
       token,
       body: { title, member_ids: memberIds }
     }),
+  createGroupInvite: (token, conversationId) =>
+    request(`/conversations/${conversationId}/invites`, { method: "POST", token }),
+  getGroupInvite: (token, inviteToken) => request(`/group-invites/${inviteToken}`, { token }),
+  joinGroupInvite: (token, inviteToken) =>
+    request(`/group-invites/${inviteToken}/join`, { method: "POST", token }),
   leaveConversation: (token, conversationId) =>
     request(`/conversations/${conversationId}/members/me`, { method: "DELETE", token }),
   getMessages: (token, conversationId) => request(`/conversations/${conversationId}/messages`, { token }),

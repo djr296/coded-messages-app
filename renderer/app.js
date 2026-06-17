@@ -44,11 +44,15 @@ const els = {
   groupFriendList: document.getElementById("group-friend-list"),
   groupCreateBtn: document.getElementById("group-create-btn"),
   groupStatus: document.getElementById("group-status"),
+  groupInviteInput: document.getElementById("group-invite-input"),
+  groupJoinBtn: document.getElementById("group-join-btn"),
+  groupJoinStatus: document.getElementById("group-join-status"),
   requestList: document.getElementById("request-list"),
   outgoingRequestList: document.getElementById("outgoing-request-list"),
   removeFriendBtn: document.getElementById("remove-friend-btn"),
   reportUserBtn: document.getElementById("report-user-btn"),
   blockUserBtn: document.getElementById("block-user-btn"),
+  groupInviteBtn: document.getElementById("group-invite-btn"),
   leaveGroupBtn: document.getElementById("leave-group-btn"),
 
   friendUsernameInput: document.getElementById("friend-username-input"),
@@ -142,6 +146,10 @@ function setFriendStatus(text) {
 
 function setGroupStatus(text) {
   els.groupStatus.textContent = text || "";
+}
+
+function setGroupJoinStatus(text) {
+  els.groupJoinStatus.textContent = text || "";
 }
 
 function setChatStatus(text) {
@@ -319,6 +327,19 @@ function getConversationTitle(conversation) {
     return conversation.title || "Group Chat";
   }
   return conversation.other_user ? `@${conversation.other_user.username}` : "Direct Chat";
+}
+
+function makeGroupInviteLink(token) {
+  return `codedmessages://group/${token}`;
+}
+
+function extractGroupInviteToken(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  const match = /(?:codedmessages:\/\/group\/|group\/)?([A-Za-z0-9_-]{32,})/.exec(text);
+  return match ? match[1] : text;
 }
 
 function renderAttachmentPreview() {
@@ -657,6 +678,7 @@ function renderMessages() {
     els.removeFriendBtn.classList.add("hidden");
     els.reportUserBtn.classList.add("hidden");
     els.blockUserBtn.classList.add("hidden");
+    els.groupInviteBtn.classList.add("hidden");
     els.leaveGroupBtn.classList.add("hidden");
     return;
   }
@@ -668,6 +690,10 @@ function renderMessages() {
     els.removeFriendBtn.classList.add("hidden");
     els.reportUserBtn.classList.add("hidden");
     els.blockUserBtn.classList.add("hidden");
+    els.groupInviteBtn.classList.toggle(
+      "hidden",
+      Number(selectedConversation.created_by_user_id) !== Number(state.me && state.me.id)
+    );
     els.leaveGroupBtn.classList.remove("hidden");
   } else {
     els.chatTitle.textContent = selectedFriend
@@ -676,6 +702,7 @@ function renderMessages() {
     els.removeFriendBtn.classList.remove("hidden");
     els.reportUserBtn.classList.remove("hidden");
     els.blockUserBtn.classList.remove("hidden");
+    els.groupInviteBtn.classList.add("hidden");
     els.leaveGroupBtn.classList.add("hidden");
   }
 
@@ -1035,6 +1062,44 @@ function wireEvents() {
     }
   });
 
+  els.groupJoinBtn.addEventListener("click", async () => {
+    const inviteToken = extractGroupInviteToken(els.groupInviteInput.value);
+    if (!inviteToken) {
+      setGroupJoinStatus("Paste an invite link or code.");
+      return;
+    }
+
+    try {
+      setButtonBusy(els.groupJoinBtn, true, "Join", "Joining...");
+      setGroupJoinStatus("Checking invite...");
+      const invite = await withServerWakeMessage(
+        () => window.codedApi.getGroupInvite(state.token, inviteToken),
+        "Checking group invite..."
+      );
+      const confirmed = window.confirm(
+        `Join "${invite.invite.title}"? This invite expires ${formatTimestamp(invite.invite.expires_at)}.`
+      );
+      if (!confirmed) {
+        setGroupJoinStatus("Join cancelled.");
+        return;
+      }
+
+      const joined = await withServerWakeMessage(
+        () => window.codedApi.joinGroupInvite(state.token, inviteToken),
+        "Joining group chat..."
+      );
+      els.groupInviteInput.value = "";
+      state.selectedConversationId = joined.conversation_id;
+      state.selectedUsername = joined.title;
+      await refreshSocialData();
+      setGroupJoinStatus(`Joined "${joined.title}".`);
+    } catch (err) {
+      setGroupJoinStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.groupJoinBtn, false, "Join", "");
+    }
+  });
+
   els.sendForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = els.messageInput.value.trim();
@@ -1214,6 +1279,33 @@ function wireEvents() {
       setChatStatus(normalizeErrorMessage(err));
     } finally {
       setButtonBusy(els.leaveGroupBtn, false, "Leave Group", "");
+    }
+  });
+
+  els.groupInviteBtn.addEventListener("click", async () => {
+    const selectedConversation = getSelectedConversation();
+    if (!selectedConversation || selectedConversation.type !== "group") {
+      return;
+    }
+
+    try {
+      setButtonBusy(els.groupInviteBtn, true, "Invite Link", "Creating...");
+      const resp = await withServerWakeMessage(
+        () => window.codedApi.createGroupInvite(state.token, selectedConversation.id),
+        "Creating invite link..."
+      );
+      const link = makeGroupInviteLink(resp.token);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(link);
+        setChatStatus(`Invite link copied. It expires ${formatTimestamp(resp.expires_at)}.`);
+      } else {
+        window.prompt("Copy this invite link:", link);
+        setChatStatus(`Invite link created. It expires ${formatTimestamp(resp.expires_at)}.`);
+      }
+    } catch (err) {
+      setChatStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.groupInviteBtn, false, "Invite Link", "");
     }
   });
 

@@ -14,6 +14,7 @@ const MAX_AVATAR_BYTES = 512 * 1024;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_USERNAME_CHARS = 32;
+const GROUP_INVITE_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const ALLOWED_AVATAR_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const ALLOWED_ATTACHMENT_TYPES = new Set([
   ...ALLOWED_AVATAR_TYPES,
@@ -149,12 +150,24 @@ function hashResetCode(code) {
   return crypto.createHash("sha256").update(code).digest("hex");
 }
 
+function hashInviteToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function generateInviteToken() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
 function generateResetCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 function resetCodeExpiresAt() {
   return new Date(Date.now() + (15 * 60 * 1000)).toISOString();
+}
+
+function groupInviteExpiresAt() {
+  return new Date(Date.now() + GROUP_INVITE_EXPIRY_MS).toISOString();
 }
 
 function numericId(value) {
@@ -263,6 +276,15 @@ async function createSqliteDb(dbPath) {
       user_id INTEGER NOT NULL,
       UNIQUE(conversation_id, user_id)
     )`,
+    `CREATE TABLE IF NOT EXISTS group_invites (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_by_user_id INTEGER NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       conversation_id INTEGER NOT NULL,
@@ -323,6 +345,8 @@ async function createSqliteDb(dbPath) {
     "CREATE INDEX IF NOT EXISTS idx_friendships_user_b ON friendships(user_b_id)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_type ON conversations(type)",
     "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_group_invites_conversation ON group_invites(conversation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_group_invites_token_hash ON group_invites(token_hash)",
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)"
   ].forEach((stmt) => run(stmt));
   persist();
@@ -427,6 +451,15 @@ async function createPostgresDb(databaseUrl) {
       user_id BIGINT NOT NULL,
       UNIQUE(conversation_id, user_id)
     )`,
+    `CREATE TABLE IF NOT EXISTS group_invites (
+      id BIGSERIAL PRIMARY KEY,
+      conversation_id BIGINT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_by_user_id BIGINT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
       conversation_id BIGINT NOT NULL,
@@ -462,6 +495,7 @@ async function createPostgresDb(databaseUrl) {
     "friendships",
     "conversations",
     "conversation_members",
+    "group_invites",
     "messages",
     "password_reset_tokens"
   ]) {
@@ -488,6 +522,8 @@ async function createPostgresDb(databaseUrl) {
     "CREATE INDEX IF NOT EXISTS idx_friendships_user_b ON friendships(user_b_id)",
     "CREATE INDEX IF NOT EXISTS idx_conversations_type ON conversations(type)",
     "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_group_invites_conversation ON group_invites(conversation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_group_invites_token_hash ON group_invites(token_hash)",
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)"
   ]) {
     await run(stmt);
@@ -1509,6 +1545,141 @@ async function createApiServer({
     }
   });
 
+  app.post("/conversations/:id/invites", requireAuth, socialLimiter, async (req, res, next) => {
+    try {
+      const conversationId = Number(req.params.id);
+      const conversation = await db.get(
+        "SELECT id, title, type, created_by_user_id FROM conversations WHERE id = $id",
+        { $id: conversationId }
+      );
+      if (!conversation || conversation.type !== "group") {
+        return res.status(404).json({ error: "Group conversation not found." });
+      }
+      if (Number(conversation.created_by_user_id) !== Number(req.user.id)) {
+        return res.status(403).json({ error: "Only the group creator can create invite links." });
+      }
+      if (!(await isConversationMember(req.user.id, conversationId))) {
+        return res.status(403).json({ error: "Not a conversation member." });
+      }
+
+      await db.run(
+        "UPDATE group_invites SET revoked_at = $revokedAt WHERE conversation_id = $conversationId AND revoked_at IS NULL",
+        { $revokedAt: nowIso(), $conversationId: conversationId }
+      );
+
+      const token = generateInviteToken();
+      const expiresAt = groupInviteExpiresAt();
+      await db.insert(
+        `INSERT INTO group_invites (
+          conversation_id, token_hash, created_by_user_id, expires_at, revoked_at, created_at
+        ) VALUES (
+          $conversationId, $tokenHash, $createdBy, $expiresAt, NULL, $createdAt
+        )`,
+        {
+          $conversationId: conversationId,
+          $tokenHash: hashInviteToken(token),
+          $createdBy: req.user.id,
+          $expiresAt: expiresAt,
+          $createdAt: nowIso()
+        }
+      );
+      await db.persist();
+
+      return res.json({
+        token,
+        expires_at: expiresAt,
+        conversation: {
+          id: Number(conversation.id),
+          title: conversation.title || "Group Chat"
+        }
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.get("/group-invites/:token", requireAuth, async (req, res, next) => {
+    try {
+      const token = String(req.params.token || "").trim();
+      const invite = await db.get(
+        `SELECT gi.id, gi.expires_at, c.id AS conversation_id, c.title
+         FROM group_invites gi
+         JOIN conversations c ON c.id = gi.conversation_id
+         WHERE gi.token_hash = $tokenHash
+           AND gi.revoked_at IS NULL
+           AND gi.expires_at >= $now
+           AND c.type = 'group'
+         LIMIT 1`,
+        { $tokenHash: hashInviteToken(token), $now: nowIso() }
+      );
+
+      if (!invite) {
+        return res.status(404).json({ error: "Invite link is invalid or expired." });
+      }
+
+      const members = await getConversationMembers(db, invite.conversation_id);
+      if (await conversationHasBlockedMember(db, req.user.id, members)) {
+        return res.status(403).json({ error: "This invite is unavailable for your account." });
+      }
+
+      return res.json({
+        invite: {
+          conversation_id: Number(invite.conversation_id),
+          title: invite.title || "Group Chat",
+          expires_at: invite.expires_at,
+          member_count: members.length,
+          already_member: members.some((member) => Number(member.id) === Number(req.user.id))
+        }
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.post("/group-invites/:token/join", requireAuth, socialLimiter, async (req, res, next) => {
+    try {
+      const token = String(req.params.token || "").trim();
+      const invite = await db.get(
+        `SELECT gi.id, gi.conversation_id, gi.expires_at, c.title
+         FROM group_invites gi
+         JOIN conversations c ON c.id = gi.conversation_id
+         WHERE gi.token_hash = $tokenHash
+           AND gi.revoked_at IS NULL
+           AND gi.expires_at >= $now
+           AND c.type = 'group'
+         LIMIT 1`,
+        { $tokenHash: hashInviteToken(token), $now: nowIso() }
+      );
+
+      if (!invite) {
+        return res.status(404).json({ error: "Invite link is invalid or expired." });
+      }
+
+      const members = await getConversationMembers(db, invite.conversation_id);
+      if (await conversationHasBlockedMember(db, req.user.id, members)) {
+        return res.status(403).json({ error: "This invite is unavailable for your account." });
+      }
+
+      const existingMember = members.some((member) => Number(member.id) === Number(req.user.id));
+      if (!existingMember) {
+        await db.insert(
+          "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($conversationId, $userId)",
+          { $conversationId: invite.conversation_id, $userId: req.user.id }
+        );
+        await db.persist();
+      }
+
+      return res.json({
+        ok: true,
+        conversation_id: Number(invite.conversation_id),
+        title: invite.title || "Group Chat",
+        already_member: existingMember
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
   app.delete("/conversations/:id/members/me", requireAuth, async (req, res, next) => {
     try {
       const conversationId = Number(req.params.id);
@@ -1559,7 +1730,7 @@ async function createApiServer({
   app.get("/conversations", requireAuth, async (req, res, next) => {
     try {
       const myConversations = await db.all(
-        `SELECT c.id, c.title, c.type, c.created_at
+        `SELECT c.id, c.title, c.type, c.created_by_user_id, c.created_at
          FROM conversations c
          JOIN conversation_members cm ON cm.conversation_id = c.id
          WHERE cm.user_id = $me
@@ -1584,6 +1755,7 @@ async function createApiServer({
           id: Number(c.id),
           type: c.type === "group" ? "group" : "direct",
           title: c.title || "",
+          created_by_user_id: c.created_by_user_id ? Number(c.created_by_user_id) : null,
           created_at: c.created_at,
           members: members.map((member) => ({
             id: Number(member.id),
