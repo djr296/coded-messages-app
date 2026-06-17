@@ -53,6 +53,8 @@ const els = {
   reportUserBtn: document.getElementById("report-user-btn"),
   blockUserBtn: document.getElementById("block-user-btn"),
   groupInviteBtn: document.getElementById("group-invite-btn"),
+  groupInviteForeverBtn: document.getElementById("group-invite-forever-btn"),
+  groupInviteRevokeBtn: document.getElementById("group-invite-revoke-btn"),
   leaveGroupBtn: document.getElementById("leave-group-btn"),
 
   friendUsernameInput: document.getElementById("friend-username-input"),
@@ -340,6 +342,40 @@ function extractGroupInviteToken(value) {
   }
   const match = /(?:codedmessages:\/\/group\/|group\/)?([A-Za-z0-9_-]{32,})/.exec(text);
   return match ? match[1] : text;
+}
+
+async function createAndCopyGroupInvite(expiresIn) {
+  const selectedConversation = getSelectedConversation();
+  if (!selectedConversation || selectedConversation.type !== "group") {
+    return;
+  }
+
+  const isForever = expiresIn === "never";
+  const button = isForever ? els.groupInviteForeverBtn : els.groupInviteBtn;
+  const idleText = isForever ? "Forever Invite" : "24h Invite";
+
+  try {
+    setButtonBusy(button, true, idleText, "Creating...");
+    const resp = await withServerWakeMessage(
+      () => window.codedApi.createGroupInvite(state.token, selectedConversation.id, expiresIn),
+      "Creating invite link..."
+    );
+    const link = makeGroupInviteLink(resp.token);
+    const expiryText = resp.expires_at
+      ? `It expires ${formatTimestamp(resp.expires_at)}.`
+      : "It never expires until you turn links off.";
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(link);
+      setChatStatus(`Invite link copied. ${expiryText}`);
+    } else {
+      window.prompt("Copy this invite link:", link);
+      setChatStatus(`Invite link created. ${expiryText}`);
+    }
+  } catch (err) {
+    setChatStatus(normalizeErrorMessage(err));
+  } finally {
+    setButtonBusy(button, false, idleText, "");
+  }
 }
 
 function renderAttachmentPreview() {
@@ -679,6 +715,8 @@ function renderMessages() {
     els.reportUserBtn.classList.add("hidden");
     els.blockUserBtn.classList.add("hidden");
     els.groupInviteBtn.classList.add("hidden");
+    els.groupInviteForeverBtn.classList.add("hidden");
+    els.groupInviteRevokeBtn.classList.add("hidden");
     els.leaveGroupBtn.classList.add("hidden");
     return;
   }
@@ -690,10 +728,10 @@ function renderMessages() {
     els.removeFriendBtn.classList.add("hidden");
     els.reportUserBtn.classList.add("hidden");
     els.blockUserBtn.classList.add("hidden");
-    els.groupInviteBtn.classList.toggle(
-      "hidden",
-      Number(selectedConversation.created_by_user_id) !== Number(state.me && state.me.id)
-    );
+    const isCreator = Number(selectedConversation.created_by_user_id) === Number(state.me && state.me.id);
+    els.groupInviteBtn.classList.toggle("hidden", !isCreator);
+    els.groupInviteForeverBtn.classList.toggle("hidden", !isCreator);
+    els.groupInviteRevokeBtn.classList.toggle("hidden", !isCreator);
     els.leaveGroupBtn.classList.remove("hidden");
   } else {
     els.chatTitle.textContent = selectedFriend
@@ -703,6 +741,8 @@ function renderMessages() {
     els.reportUserBtn.classList.remove("hidden");
     els.blockUserBtn.classList.remove("hidden");
     els.groupInviteBtn.classList.add("hidden");
+    els.groupInviteForeverBtn.classList.add("hidden");
+    els.groupInviteRevokeBtn.classList.add("hidden");
     els.leaveGroupBtn.classList.add("hidden");
   }
 
@@ -1076,8 +1116,11 @@ function wireEvents() {
         () => window.codedApi.getGroupInvite(state.token, inviteToken),
         "Checking group invite..."
       );
+      const expiryText = invite.invite.expires_at
+        ? `This invite expires ${formatTimestamp(invite.invite.expires_at)}.`
+        : "This invite does not expire.";
       const confirmed = window.confirm(
-        `Join "${invite.invite.title}"? This invite expires ${formatTimestamp(invite.invite.expires_at)}.`
+        `Join "${invite.invite.title}"? ${expiryText}`
       );
       if (!confirmed) {
         setGroupJoinStatus("Join cancelled.");
@@ -1282,30 +1325,38 @@ function wireEvents() {
     }
   });
 
-  els.groupInviteBtn.addEventListener("click", async () => {
+  els.groupInviteBtn.addEventListener("click", () => {
+    createAndCopyGroupInvite("24h");
+  });
+
+  els.groupInviteForeverBtn.addEventListener("click", () => {
+    createAndCopyGroupInvite("never");
+  });
+
+  els.groupInviteRevokeBtn.addEventListener("click", async () => {
     const selectedConversation = getSelectedConversation();
     if (!selectedConversation || selectedConversation.type !== "group") {
       return;
     }
 
+    const confirmed = window.confirm(
+      `Turn off all current invite links for "${getConversationTitle(selectedConversation)}"?`
+    );
+    if (!confirmed) {
+      return;
+    }
+
     try {
-      setButtonBusy(els.groupInviteBtn, true, "Invite Link", "Creating...");
-      const resp = await withServerWakeMessage(
-        () => window.codedApi.createGroupInvite(state.token, selectedConversation.id),
-        "Creating invite link..."
+      setButtonBusy(els.groupInviteRevokeBtn, true, "Turn Off Links", "Turning off...");
+      await withServerWakeMessage(
+        () => window.codedApi.revokeGroupInvites(state.token, selectedConversation.id),
+        "Turning off group invite links..."
       );
-      const link = makeGroupInviteLink(resp.token);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(link);
-        setChatStatus(`Invite link copied. It expires ${formatTimestamp(resp.expires_at)}.`);
-      } else {
-        window.prompt("Copy this invite link:", link);
-        setChatStatus(`Invite link created. It expires ${formatTimestamp(resp.expires_at)}.`);
-      }
+      setChatStatus("All current invite links for this group are turned off.");
     } catch (err) {
       setChatStatus(normalizeErrorMessage(err));
     } finally {
-      setButtonBusy(els.groupInviteBtn, false, "Invite Link", "");
+      setButtonBusy(els.groupInviteRevokeBtn, false, "Turn Off Links", "");
     }
   });
 

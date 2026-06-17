@@ -27,7 +27,8 @@ The current public release target is focused on:
 - Remove friend
 - 1:1 conversations with persisted message history
 - Group chats with friend invites
-- Group invite links that expire after 24 hours
+- Group invite links with 24-hour or never-expiring options
+- Turn off all current group invite links
 - Leave group chat
 - Per-message send mode: `Encoded` or `Plain text`
 - Message timestamps in chat

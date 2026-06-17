@@ -281,7 +281,7 @@ async function createSqliteDb(dbPath) {
       conversation_id INTEGER NOT NULL,
       token_hash TEXT NOT NULL UNIQUE,
       created_by_user_id INTEGER NOT NULL,
-      expires_at TEXT NOT NULL,
+      expires_at TEXT,
       revoked_at TEXT,
       created_at TEXT NOT NULL
     )`,
@@ -299,7 +299,7 @@ async function createSqliteDb(dbPath) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       token_hash TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
+      expires_at TEXT,
       used_at TEXT,
       created_at TEXT NOT NULL
     )`
@@ -456,7 +456,7 @@ async function createPostgresDb(databaseUrl) {
       conversation_id BIGINT NOT NULL,
       token_hash TEXT NOT NULL UNIQUE,
       created_by_user_id BIGINT NOT NULL,
-      expires_at TEXT NOT NULL,
+      expires_at TEXT,
       revoked_at TEXT,
       created_at TEXT NOT NULL
     )`,
@@ -506,6 +506,7 @@ async function createPostgresDb(databaseUrl) {
   await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''");
   await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'direct'");
   await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT");
+  await run("ALTER TABLE group_invites ALTER COLUMN expires_at DROP NOT NULL");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_mode TEXT NOT NULL DEFAULT 'coded'");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_type TEXT");
@@ -1567,8 +1568,13 @@ async function createApiServer({
         { $revokedAt: nowIso(), $conversationId: conversationId }
       );
 
+      const expiresIn = String(req.body.expires_in || "24h").trim().toLowerCase();
+      if (!["24h", "never"].includes(expiresIn)) {
+        return res.status(400).json({ error: "Invite expiration must be 24h or never." });
+      }
+
       const token = generateInviteToken();
-      const expiresAt = groupInviteExpiresAt();
+      const expiresAt = expiresIn === "never" ? null : groupInviteExpiresAt();
       await db.insert(
         `INSERT INTO group_invites (
           conversation_id, token_hash, created_by_user_id, expires_at, revoked_at, created_at
@@ -1588,11 +1594,40 @@ async function createApiServer({
       return res.json({
         token,
         expires_at: expiresAt,
+        expires_in: expiresIn,
         conversation: {
           id: Number(conversation.id),
           title: conversation.title || "Group Chat"
         }
       });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.delete("/conversations/:id/invites", requireAuth, async (req, res, next) => {
+    try {
+      const conversationId = Number(req.params.id);
+      const conversation = await db.get(
+        "SELECT id, type, created_by_user_id FROM conversations WHERE id = $id",
+        { $id: conversationId }
+      );
+      if (!conversation || conversation.type !== "group") {
+        return res.status(404).json({ error: "Group conversation not found." });
+      }
+      if (Number(conversation.created_by_user_id) !== Number(req.user.id)) {
+        return res.status(403).json({ error: "Only the group creator can turn off invite links." });
+      }
+      if (!(await isConversationMember(req.user.id, conversationId))) {
+        return res.status(403).json({ error: "Not a conversation member." });
+      }
+
+      await db.run(
+        "UPDATE group_invites SET revoked_at = $revokedAt WHERE conversation_id = $conversationId AND revoked_at IS NULL",
+        { $revokedAt: nowIso(), $conversationId: conversationId }
+      );
+      await db.persist();
+      return res.json({ ok: true });
     } catch (err) {
       return next(err);
     }
@@ -1607,7 +1642,7 @@ async function createApiServer({
          JOIN conversations c ON c.id = gi.conversation_id
          WHERE gi.token_hash = $tokenHash
            AND gi.revoked_at IS NULL
-           AND gi.expires_at >= $now
+           AND (gi.expires_at IS NULL OR gi.expires_at >= $now)
            AND c.type = 'group'
          LIMIT 1`,
         { $tokenHash: hashInviteToken(token), $now: nowIso() }
@@ -1626,7 +1661,7 @@ async function createApiServer({
         invite: {
           conversation_id: Number(invite.conversation_id),
           title: invite.title || "Group Chat",
-          expires_at: invite.expires_at,
+          expires_at: invite.expires_at || null,
           member_count: members.length,
           already_member: members.some((member) => Number(member.id) === Number(req.user.id))
         }
@@ -1645,7 +1680,7 @@ async function createApiServer({
          JOIN conversations c ON c.id = gi.conversation_id
          WHERE gi.token_hash = $tokenHash
            AND gi.revoked_at IS NULL
-           AND gi.expires_at >= $now
+           AND (gi.expires_at IS NULL OR gi.expires_at >= $now)
            AND c.type = 'group'
          LIMIT 1`,
         { $tokenHash: hashInviteToken(token), $now: nowIso() }

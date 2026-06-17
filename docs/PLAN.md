@@ -10,7 +10,8 @@
 - Friend requests with accept, decline, cancel, remove, block, and report controls
 - 1:1 conversation creation and message persistence
 - Group chat creation with friend invites
-- 24-hour group invite links
+- 24-hour and never-expiring group invite links
+- Creator-only group invite link revocation
 - Coded display in chat + decrypter tab
 - Plain-text send mode and timestamps
 - Background multi-device synchronization

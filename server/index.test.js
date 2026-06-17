@@ -197,6 +197,37 @@ test("authorization, blocking, attachments, and sessions", async (t) => {
   );
   assert.equal(charlieGroupReadAfterJoin.status, 200);
 
+  const foreverInvite = await request(baseUrl, `/conversations/${group.payload.conversation_id}/invites`, {
+    method: "POST",
+    token: alice.token,
+    body: { expires_in: "never" }
+  });
+  assert.equal(foreverInvite.status, 200);
+  assert.equal(foreverInvite.payload.expires_at, null);
+  assert.equal(foreverInvite.payload.expires_in, "never");
+
+  const oldInviteLookup = await request(baseUrl, `/group-invites/${groupInvite.payload.token}`, {
+    token: bob.token
+  });
+  assert.equal(oldInviteLookup.status, 404);
+
+  const foreverInviteLookup = await request(baseUrl, `/group-invites/${foreverInvite.payload.token}`, {
+    token: bob.token
+  });
+  assert.equal(foreverInviteLookup.status, 200);
+  assert.equal(foreverInviteLookup.payload.invite.expires_at, null);
+
+  const revokedInvites = await request(baseUrl, `/conversations/${group.payload.conversation_id}/invites`, {
+    method: "DELETE",
+    token: alice.token
+  });
+  assert.equal(revokedInvites.status, 200);
+
+  const revokedInviteLookup = await request(baseUrl, `/group-invites/${foreverInvite.payload.token}`, {
+    token: bob.token
+  });
+  assert.equal(revokedInviteLookup.status, 404);
+
   const report = await request(baseUrl, `/reports/${bob.user.id}`, {
     method: "POST",
     token: alice.token,
