@@ -53,6 +53,14 @@ contextBridge.exposeInMainWorld("codedApi", {
     request(`/reports/${userId}`, { method: "POST", token, body: { reason } }),
   getFriends: (token) => request("/friends", { token }),
   getConversations: (token) => request("/conversations", { token }),
+  createGroupConversation: (token, title, memberIds) =>
+    request("/conversations/groups", {
+      method: "POST",
+      token,
+      body: { title, member_ids: memberIds }
+    }),
+  leaveConversation: (token, conversationId) =>
+    request(`/conversations/${conversationId}/members/me`, { method: "DELETE", token }),
   getMessages: (token, conversationId) => request(`/conversations/${conversationId}/messages`, { token }),
   sendMessage: (token, conversationId, body, displayMode = "coded", attachment = null) =>
     request(`/conversations/${conversationId}/messages`, {

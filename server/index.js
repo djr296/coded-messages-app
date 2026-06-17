@@ -252,6 +252,9 @@ async function createSqliteDb(dbPath) {
     )`,
     `CREATE TABLE IF NOT EXISTS conversations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'direct',
+      created_by_user_id INTEGER,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS conversation_members (
@@ -286,6 +289,16 @@ async function createSqliteDb(dbPath) {
     run("ALTER TABLE users ADD COLUMN last_seen_at TEXT");
   }
   const messageColumns = all("PRAGMA table_info(messages)");
+  const conversationColumns = all("PRAGMA table_info(conversations)");
+  if (!conversationColumns.some((column) => String(column.name) === "title")) {
+    run("ALTER TABLE conversations ADD COLUMN title TEXT DEFAULT ''");
+  }
+  if (!conversationColumns.some((column) => String(column.name) === "type")) {
+    run("ALTER TABLE conversations ADD COLUMN type TEXT NOT NULL DEFAULT 'direct'");
+  }
+  if (!conversationColumns.some((column) => String(column.name) === "created_by_user_id")) {
+    run("ALTER TABLE conversations ADD COLUMN created_by_user_id INTEGER");
+  }
   if (!messageColumns.some((column) => String(column.name) === "display_mode")) {
     run("ALTER TABLE messages ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'coded'");
   }
@@ -308,6 +321,7 @@ async function createSqliteDb(dbPath) {
     "CREATE INDEX IF NOT EXISTS idx_friend_requests_from_status ON friend_requests(from_user_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_friendships_user_a ON friendships(user_a_id)",
     "CREATE INDEX IF NOT EXISTS idx_friendships_user_b ON friendships(user_b_id)",
+    "CREATE INDEX IF NOT EXISTS idx_conversations_type ON conversations(type)",
     "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)"
   ].forEach((stmt) => run(stmt));
@@ -402,6 +416,9 @@ async function createPostgresDb(databaseUrl) {
     )`,
     `CREATE TABLE IF NOT EXISTS conversations (
       id BIGSERIAL PRIMARY KEY,
+      title TEXT DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'direct',
+      created_by_user_id BIGINT,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS conversation_members (
@@ -452,6 +469,9 @@ async function createPostgresDb(databaseUrl) {
   }
 
   await run("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TEXT");
+  await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''");
+  await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'direct'");
+  await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS display_mode TEXT NOT NULL DEFAULT 'coded'");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT");
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_type TEXT");
@@ -466,6 +486,7 @@ async function createPostgresDb(databaseUrl) {
     "CREATE INDEX IF NOT EXISTS idx_friend_requests_from_status ON friend_requests(from_user_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_friendships_user_a ON friendships(user_a_id)",
     "CREATE INDEX IF NOT EXISTS idx_friendships_user_b ON friendships(user_b_id)",
+    "CREATE INDEX IF NOT EXISTS idx_conversations_type ON conversations(type)",
     "CREATE INDEX IF NOT EXISTS idx_conversation_members_user ON conversation_members(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, id)"
   ]) {
@@ -520,16 +541,55 @@ async function usersAreBlocked(db, userA, userB) {
   return !!block;
 }
 
-async function removeRelationship(db, userA, userB) {
-  const [a, b] = makePair(Number(userA), Number(userB));
-  const conversation = await db.get(
+async function getDirectConversation(db, userA, userB) {
+  return db.get(
     `SELECT c.id
      FROM conversations c
      JOIN conversation_members m1 ON m1.conversation_id = c.id AND m1.user_id = $userA
      JOIN conversation_members m2 ON m2.conversation_id = c.id AND m2.user_id = $userB
+     WHERE c.type = 'direct'
+       AND (
+         SELECT COUNT(*)
+         FROM conversation_members cm
+         WHERE cm.conversation_id = c.id
+       ) = 2
      LIMIT 1`,
     { $userA: userA, $userB: userB }
   );
+}
+
+async function getConversationMembers(db, conversationId) {
+  return db.all(
+    `SELECT u.id, u.username, u.profile_image_path, u.last_seen_at
+     FROM conversation_members cm
+     JOIN users u ON u.id = cm.user_id
+     WHERE cm.conversation_id = $conversationId
+     ORDER BY lower(u.username)`,
+    { $conversationId: conversationId }
+  );
+}
+
+async function conversationHasBlockedMember(db, userId, members) {
+  for (const member of members) {
+    if (Number(member.id) !== Number(userId) && await usersAreBlocked(db, userId, member.id)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function usersAreFriends(db, userA, userB) {
+  const [a, b] = makePair(Number(userA), Number(userB));
+  const row = await db.get(
+    "SELECT id FROM friendships WHERE user_a_id = $a AND user_b_id = $b",
+    { $a: a, $b: b }
+  );
+  return !!row;
+}
+
+async function removeRelationship(db, userA, userB) {
+  const [a, b] = makePair(Number(userA), Number(userB));
+  const conversation = await getDirectConversation(db, userA, userB);
 
   await db.run("DELETE FROM friendships WHERE user_a_id = $a AND user_b_id = $b", { $a: a, $b: b });
   await db.run(
@@ -1244,19 +1304,13 @@ async function createApiServer({
         );
       }
 
-      const existingConversation = await db.get(
-        `SELECT c.id
-         FROM conversations c
-         JOIN conversation_members m1 ON m1.conversation_id = c.id AND m1.user_id = $u1
-         JOIN conversation_members m2 ON m2.conversation_id = c.id AND m2.user_id = $u2
-         LIMIT 1`,
-        { $u1: a, $u2: b }
-      );
+      const existingConversation = await getDirectConversation(db, a, b);
 
       if (!existingConversation) {
-        const row = await db.insert("INSERT INTO conversations (created_at) VALUES ($created)", {
-          $created: nowIso()
-        });
+        const row = await db.insert(
+          "INSERT INTO conversations (title, type, created_by_user_id, created_at) VALUES ('', 'direct', $createdBy, $created)",
+          { $createdBy: req.user.id, $created: nowIso() }
+        );
         await db.run(
           "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($c, $u1), ($c, $u2)",
           { $c: row.id, $u1: a, $u2: b }
@@ -1347,14 +1401,7 @@ async function createApiServer({
 
       const friends = [];
       for (const row of rows) {
-        const convo = await db.get(
-          `SELECT c.id
-           FROM conversations c
-           JOIN conversation_members m1 ON m1.conversation_id = c.id AND m1.user_id = $me
-           JOIN conversation_members m2 ON m2.conversation_id = c.id AND m2.user_id = $friend
-           LIMIT 1`,
-          { $me: req.user.id, $friend: row.user_id }
-        );
+        const convo = await getDirectConversation(db, req.user.id, row.user_id);
 
         friends.push({
           friendship_id: Number(row.friendship_id),
@@ -1390,14 +1437,7 @@ async function createApiServer({
         return res.status(404).json({ error: "Friendship not found." });
       }
 
-      const conversation = await db.get(
-        `SELECT c.id
-         FROM conversations c
-         JOIN conversation_members m1 ON m1.conversation_id = c.id AND m1.user_id = $u1
-         JOIN conversation_members m2 ON m2.conversation_id = c.id AND m2.user_id = $u2
-         LIMIT 1`,
-        { $u1: req.user.id, $u2: friendUserId }
-      );
+      const conversation = await getDirectConversation(db, req.user.id, friendUserId);
 
       await db.run("DELETE FROM friendships WHERE id = $id", { $id: friendship.id });
       await db.run(
@@ -1420,6 +1460,94 @@ async function createApiServer({
     }
   });
 
+  app.post("/conversations/groups", requireAuth, socialLimiter, async (req, res, next) => {
+    try {
+      const title = String(req.body.title || "").trim().slice(0, 60);
+      const rawMemberIds = Array.isArray(req.body.member_ids) ? req.body.member_ids : [];
+      const memberIds = [...new Set(rawMemberIds.map((id) => Number(id)).filter(Boolean))]
+        .filter((id) => id !== Number(req.user.id));
+
+      if (!title) {
+        return res.status(400).json({ error: "Group name is required." });
+      }
+      if (memberIds.length === 0) {
+        return res.status(400).json({ error: "Choose at least one friend for the group." });
+      }
+      if (memberIds.length > 20) {
+        return res.status(400).json({ error: "Groups can include up to 20 invited friends." });
+      }
+
+      for (const memberId of memberIds) {
+        if (!(await usersAreFriends(db, req.user.id, memberId))) {
+          return res.status(400).json({ error: "Groups can only include your friends." });
+        }
+        if (await usersAreBlocked(db, req.user.id, memberId)) {
+          return res.status(403).json({ error: "Blocked users cannot be added to a group." });
+        }
+      }
+
+      const row = await db.insert(
+        "INSERT INTO conversations (title, type, created_by_user_id, created_at) VALUES ($title, 'group', $createdBy, $createdAt)",
+        { $title: title, $createdBy: req.user.id, $createdAt: nowIso() }
+      );
+
+      await db.insert(
+        "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($conversationId, $userId)",
+        { $conversationId: row.id, $userId: req.user.id }
+      );
+      for (const memberId of memberIds) {
+        await db.insert(
+          "INSERT INTO conversation_members (conversation_id, user_id) VALUES ($conversationId, $userId)",
+          { $conversationId: row.id, $userId: memberId }
+        );
+      }
+
+      await db.persist();
+      return res.json({ conversation_id: Number(row.id) });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  app.delete("/conversations/:id/members/me", requireAuth, async (req, res, next) => {
+    try {
+      const conversationId = Number(req.params.id);
+      const conversation = await db.get(
+        "SELECT id, type FROM conversations WHERE id = $id",
+        { $id: conversationId }
+      );
+      if (!conversation || conversation.type !== "group") {
+        return res.status(404).json({ error: "Group conversation not found." });
+      }
+      if (!(await isConversationMember(req.user.id, conversationId))) {
+        return res.status(403).json({ error: "Not a conversation member." });
+      }
+
+      await db.run(
+        "DELETE FROM conversation_members WHERE conversation_id = $conversationId AND user_id = $userId",
+        { $conversationId: conversationId, $userId: req.user.id }
+      );
+
+      const remaining = await db.get(
+        "SELECT COUNT(*) AS count FROM conversation_members WHERE conversation_id = $conversationId",
+        { $conversationId: conversationId }
+      );
+      if (Number(remaining.count) === 0) {
+        await db.run("DELETE FROM messages WHERE conversation_id = $conversationId", {
+          $conversationId: conversationId
+        });
+        await db.run("DELETE FROM conversations WHERE id = $conversationId", {
+          $conversationId: conversationId
+        });
+      }
+
+      await db.persist();
+      return res.json({ ok: true });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
   async function isConversationMember(userId, conversationId) {
     const row = await db.get(
       "SELECT id FROM conversation_members WHERE conversation_id = $c AND user_id = $u",
@@ -1428,21 +1556,10 @@ async function createApiServer({
     return !!row;
   }
 
-  async function getConversationPeer(userId, conversationId) {
-    return db.get(
-      `SELECT u.id, u.username
-       FROM conversation_members cm
-       JOIN users u ON u.id = cm.user_id
-       WHERE cm.conversation_id = $conversationId AND cm.user_id != $userId
-       LIMIT 1`,
-      { $conversationId: conversationId, $userId: userId }
-    );
-  }
-
   app.get("/conversations", requireAuth, async (req, res, next) => {
     try {
       const myConversations = await db.all(
-        `SELECT c.id, c.created_at
+        `SELECT c.id, c.title, c.type, c.created_at
          FROM conversations c
          JOIN conversation_members cm ON cm.conversation_id = c.id
          WHERE cm.user_id = $me
@@ -1452,14 +1569,11 @@ async function createApiServer({
 
       const conversations = [];
       for (const c of myConversations) {
-        const other = await db.get(
-          `SELECT u.id, u.username, u.profile_image_path
-           FROM conversation_members cm
-           JOIN users u ON u.id = cm.user_id
-           WHERE cm.conversation_id = $c AND u.id != $me
-           LIMIT 1`,
-          { $c: c.id, $me: req.user.id }
-        );
+        const members = await getConversationMembers(db, c.id);
+        if (await conversationHasBlockedMember(db, req.user.id, members)) {
+          continue;
+        }
+        const other = members.find((member) => Number(member.id) !== Number(req.user.id));
 
         const lastMessage = await db.get(
           "SELECT id, sender_id, body, created_at FROM messages WHERE conversation_id = $c ORDER BY id DESC LIMIT 1",
@@ -1468,7 +1582,16 @@ async function createApiServer({
 
         conversations.push({
           id: Number(c.id),
+          type: c.type === "group" ? "group" : "direct",
+          title: c.title || "",
           created_at: c.created_at,
+          members: members.map((member) => ({
+            id: Number(member.id),
+            username: member.username,
+            profile_image_path: member.profile_image_path || "",
+            last_seen_at: member.last_seen_at || null,
+            online: isRecentlyOnline(member.last_seen_at)
+          })),
           other_user: other
             ? {
                 id: Number(other.id),
@@ -1504,8 +1627,8 @@ async function createApiServer({
         return res.status(403).json({ error: "Not a conversation member." });
       }
 
-      const peer = await getConversationPeer(req.user.id, conversationId);
-      if (!peer || await usersAreBlocked(db, req.user.id, peer.id)) {
+      const members = await getConversationMembers(db, conversationId);
+      if (members.length < 2 || await conversationHasBlockedMember(db, req.user.id, members)) {
         return res.status(403).json({ error: "This conversation is unavailable." });
       }
 
@@ -1557,8 +1680,8 @@ async function createApiServer({
         return res.status(403).json({ error: "Not a conversation member." });
       }
 
-      const peer = await getConversationPeer(req.user.id, conversationId);
-      if (!peer || await usersAreBlocked(db, req.user.id, peer.id)) {
+      const members = await getConversationMembers(db, conversationId);
+      if (members.length < 2 || await conversationHasBlockedMember(db, req.user.id, members)) {
         return res.status(403).json({ error: "Messages are unavailable between these accounts." });
       }
 

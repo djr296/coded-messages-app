@@ -10,6 +10,7 @@ const state = {
   token: localStorage.getItem("coded_token") || "",
   me: null,
   friends: [],
+  conversations: [],
   requests: [],
   outgoingRequests: [],
   blockedUsers: [],
@@ -39,11 +40,16 @@ const els = {
   logoutBtn: document.getElementById("logout-btn"),
 
   chatList: document.getElementById("chat-list"),
+  groupTitleInput: document.getElementById("group-title-input"),
+  groupFriendList: document.getElementById("group-friend-list"),
+  groupCreateBtn: document.getElementById("group-create-btn"),
+  groupStatus: document.getElementById("group-status"),
   requestList: document.getElementById("request-list"),
   outgoingRequestList: document.getElementById("outgoing-request-list"),
   removeFriendBtn: document.getElementById("remove-friend-btn"),
   reportUserBtn: document.getElementById("report-user-btn"),
   blockUserBtn: document.getElementById("block-user-btn"),
+  leaveGroupBtn: document.getElementById("leave-group-btn"),
 
   friendUsernameInput: document.getElementById("friend-username-input"),
   friendAddBtn: document.getElementById("friend-add-btn"),
@@ -134,6 +140,10 @@ function setFriendStatus(text) {
   els.friendStatus.textContent = text || "";
 }
 
+function setGroupStatus(text) {
+  els.groupStatus.textContent = text || "";
+}
+
 function setChatStatus(text) {
   els.chatStatus.textContent = text || "";
 }
@@ -219,6 +229,7 @@ function clearSessionState() {
   stopBackgroundSync();
   state.me = null;
   state.friends = [];
+  state.conversations = [];
   state.requests = [];
   state.outgoingRequests = [];
   state.blockedUsers = [];
@@ -237,6 +248,7 @@ function clearSessionState() {
   setAuthMode("login");
   renderCurrentUser();
   renderFriends();
+  renderGroupFriendList();
   renderRequests();
   renderOutgoingRequests();
   renderBlockedUsers();
@@ -282,7 +294,31 @@ function getSelectedFriend() {
     return null;
   }
 
-  return state.friends.find((friend) => friend.conversation_id === state.selectedConversationId) || null;
+  const selected = getSelectedConversation();
+  if (!selected || selected.type === "group" || !selected.other_user) {
+    return null;
+  }
+
+  return state.friends.find((friend) => Number(friend.user_id) === Number(selected.other_user.id)) || null;
+}
+
+function getSelectedConversation() {
+  if (!state.selectedConversationId) {
+    return null;
+  }
+  return state.conversations.find(
+    (conversation) => Number(conversation.id) === Number(state.selectedConversationId)
+  ) || null;
+}
+
+function getConversationTitle(conversation) {
+  if (!conversation) {
+    return "";
+  }
+  if (conversation.type === "group") {
+    return conversation.title || "Group Chat";
+  }
+  return conversation.other_user ? `@${conversation.other_user.username}` : "Direct Chat";
 }
 
 function renderAttachmentPreview() {
@@ -348,33 +384,44 @@ function renderCurrentUser() {
 function renderFriends() {
   els.chatList.innerHTML = "";
 
-  if (state.friends.length === 0) {
+  if (state.conversations.length === 0) {
     const empty = document.createElement("div");
     empty.className = "status";
-    empty.textContent = "No friends yet.";
+    empty.textContent = "No chats yet.";
     els.chatList.appendChild(empty);
     return;
   }
 
-  state.friends.forEach((friend) => {
+  state.conversations.forEach((conversation) => {
     const btn = document.createElement("button");
-    const isActive = friend.conversation_id === state.selectedConversationId;
+    const isActive = Number(conversation.id) === Number(state.selectedConversationId);
+    const isGroup = conversation.type === "group";
+    const avatarUser = isGroup ? null : conversation.other_user;
     btn.className = "contact-btn" + (isActive ? " active" : "");
-    btn.appendChild(buildAvatar(friend.profile_image_path, friend.username));
+    btn.appendChild(buildAvatar(
+      avatarUser ? avatarUser.profile_image_path : "",
+      isGroup ? "#" : avatarUser ? avatarUser.username : "?"
+    ));
 
     const details = document.createElement("div");
     details.className = "contact-summary";
     const username = document.createElement("strong");
-    username.textContent = `@${friend.username}`;
+    username.textContent = getConversationTitle(conversation);
     const presence = document.createElement("span");
-    presence.className = friend.online ? "presence online" : "presence";
-    presence.textContent = formatPresence(friend);
+    if (isGroup) {
+      presence.className = "presence";
+      presence.textContent = `${conversation.members.length} members`;
+    } else {
+      const otherUser = conversation.other_user || {};
+      presence.className = otherUser.online ? "presence online" : "presence";
+      presence.textContent = formatPresence(otherUser);
+    }
     details.appendChild(username);
     details.appendChild(presence);
     btn.appendChild(details);
     btn.addEventListener("click", () => {
-      state.selectedConversationId = friend.conversation_id;
-      state.selectedUsername = friend.username;
+      state.selectedConversationId = conversation.id;
+      state.selectedUsername = getConversationTitle(conversation);
       setChatStatus("Loading conversation...");
       renderFriends();
       loadMessages().catch((err) => {
@@ -382,6 +429,28 @@ function renderFriends() {
       });
     });
     els.chatList.appendChild(btn);
+  });
+}
+
+function renderGroupFriendList() {
+  els.groupFriendList.innerHTML = "";
+
+  if (state.friends.length === 0) {
+    els.groupFriendList.textContent = "Add friends before creating a group.";
+    return;
+  }
+
+  state.friends.forEach((friend) => {
+    const label = document.createElement("label");
+    label.className = "group-friend-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = String(friend.user_id);
+    const name = document.createElement("span");
+    name.textContent = `@${friend.username}`;
+    label.appendChild(checkbox);
+    label.appendChild(name);
+    els.groupFriendList.appendChild(label);
   });
 }
 
@@ -584,20 +653,31 @@ function renderMessages() {
   els.messages.innerHTML = "";
 
   if (!state.selectedConversationId) {
-    els.chatTitle.textContent = "Select a friend";
+    els.chatTitle.textContent = "Select a chat";
     els.removeFriendBtn.classList.add("hidden");
     els.reportUserBtn.classList.add("hidden");
     els.blockUserBtn.classList.add("hidden");
+    els.leaveGroupBtn.classList.add("hidden");
     return;
   }
 
+  const selectedConversation = getSelectedConversation();
   const selectedFriend = getSelectedFriend();
-  els.chatTitle.textContent = selectedFriend
-    ? `Chat with @${state.selectedUsername} - ${formatPresence(selectedFriend)}`
-    : "Chat with @" + state.selectedUsername;
-  els.removeFriendBtn.classList.remove("hidden");
-  els.reportUserBtn.classList.remove("hidden");
-  els.blockUserBtn.classList.remove("hidden");
+  if (selectedConversation && selectedConversation.type === "group") {
+    els.chatTitle.textContent = `${getConversationTitle(selectedConversation)} - ${selectedConversation.members.length} members`;
+    els.removeFriendBtn.classList.add("hidden");
+    els.reportUserBtn.classList.add("hidden");
+    els.blockUserBtn.classList.add("hidden");
+    els.leaveGroupBtn.classList.remove("hidden");
+  } else {
+    els.chatTitle.textContent = selectedFriend
+      ? `Chat with @${selectedFriend.username} - ${formatPresence(selectedFriend)}`
+      : "Direct Chat";
+    els.removeFriendBtn.classList.remove("hidden");
+    els.reportUserBtn.classList.remove("hidden");
+    els.blockUserBtn.classList.remove("hidden");
+    els.leaveGroupBtn.classList.add("hidden");
+  }
 
   state.messages.forEach((m) => {
     const div = document.createElement("div");
@@ -671,36 +751,39 @@ async function refreshAccountSettings() {
 }
 
 async function refreshSocialData() {
-  const [friendsResp, requestsResp] = await withServerWakeMessage(
+  const [friendsResp, requestsResp, conversationsResp] = await withServerWakeMessage(
     () => Promise.all([
       window.codedApi.getFriends(state.token),
-      window.codedApi.getFriendRequests(state.token)
+      window.codedApi.getFriendRequests(state.token),
+      window.codedApi.getConversations(state.token)
     ]),
     "Syncing chats and requests..."
   );
 
-  state.friends = friendsResp.friends;
-  state.requests = requestsResp.requests;
+  state.friends = friendsResp.friends || [];
+  state.conversations = conversationsResp.conversations || [];
+  state.requests = requestsResp.requests || [];
   state.outgoingRequests = requestsResp.outgoing || [];
 
   if (!state.selectedConversationId) {
-    const first = state.friends.find((f) => f.conversation_id);
+    const first = state.conversations[0];
     if (first) {
-      state.selectedConversationId = first.conversation_id;
-      state.selectedUsername = first.username;
+      state.selectedConversationId = first.id;
+      state.selectedUsername = getConversationTitle(first);
     }
   } else {
-    const selected = state.friends.find((f) => f.conversation_id === state.selectedConversationId);
+    const selected = getSelectedConversation();
     if (!selected) {
       state.selectedConversationId = null;
       state.selectedUsername = "";
       state.messages = [];
     } else {
-      state.selectedUsername = selected.username;
+      state.selectedUsername = getConversationTitle(selected);
     }
   }
 
   renderFriends();
+  renderGroupFriendList();
   renderRequests();
   renderOutgoingRequests();
   await loadMessages();
@@ -735,29 +818,30 @@ async function backgroundSync() {
   }
 
   try {
-    const [friendsResp, requestsResp] = await Promise.all([
+    const [friendsResp, requestsResp, conversationsResp] = await Promise.all([
       window.codedApi.getFriends(state.token),
       window.codedApi.getFriendRequests(state.token),
+      window.codedApi.getConversations(state.token),
       window.codedApi.heartbeat(state.token)
     ]);
     state.friends = friendsResp.friends || [];
+    state.conversations = conversationsResp.conversations || [];
     state.requests = requestsResp.requests || [];
     state.outgoingRequests = requestsResp.outgoing || [];
 
     if (state.selectedConversationId) {
-      const selected = state.friends.find(
-        (friend) => friend.conversation_id === state.selectedConversationId
-      );
+      const selected = getSelectedConversation();
       if (!selected) {
         state.selectedConversationId = null;
         state.selectedUsername = "";
         state.messages = [];
       } else {
-        state.selectedUsername = selected.username;
+        state.selectedUsername = getConversationTitle(selected);
       }
     }
 
     renderFriends();
+    renderGroupFriendList();
     renderRequests();
     renderOutgoingRequests();
     await loadMessages({ silent: true });
@@ -914,13 +998,50 @@ function wireEvents() {
     }
   });
 
+  els.groupCreateBtn.addEventListener("click", async () => {
+    const title = els.groupTitleInput.value.trim();
+    const memberIds = Array.from(els.groupFriendList.querySelectorAll("input[type='checkbox']:checked"))
+      .map((checkbox) => Number(checkbox.value))
+      .filter(Boolean);
+
+    if (!title) {
+      setGroupStatus("Enter a group name.");
+      return;
+    }
+    if (memberIds.length === 0) {
+      setGroupStatus("Choose at least one friend.");
+      return;
+    }
+
+    try {
+      setButtonBusy(els.groupCreateBtn, true, "Create Group", "Creating...");
+      setGroupStatus("Creating group...");
+      const resp = await withServerWakeMessage(
+        () => window.codedApi.createGroupConversation(state.token, title, memberIds),
+        "Creating group chat..."
+      );
+      els.groupTitleInput.value = "";
+      els.groupFriendList.querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
+        checkbox.checked = false;
+      });
+      state.selectedConversationId = resp.conversation_id;
+      state.selectedUsername = title;
+      await refreshSocialData();
+      setGroupStatus(`Created "${title}".`);
+    } catch (err) {
+      setGroupStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.groupCreateBtn, false, "Create Group", "");
+    }
+  });
+
   els.sendForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = els.messageInput.value.trim();
 
     if ((!body && !state.pendingAttachment) || !state.selectedConversationId) {
       if (!state.selectedConversationId) {
-        setChatStatus("Choose a friend before sending a message.");
+        setChatStatus("Choose a chat before sending a message.");
       }
       return;
     }
@@ -1064,6 +1185,35 @@ function wireEvents() {
       setChatStatus(normalizeErrorMessage(err));
     } finally {
       setButtonBusy(els.blockUserBtn, false, "Block", "");
+    }
+  });
+
+  els.leaveGroupBtn.addEventListener("click", async () => {
+    const selectedConversation = getSelectedConversation();
+    if (!selectedConversation || selectedConversation.type !== "group") {
+      return;
+    }
+
+    const confirmed = window.confirm(`Leave "${getConversationTitle(selectedConversation)}"?`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setButtonBusy(els.leaveGroupBtn, true, "Leave Group", "Leaving...");
+      await withServerWakeMessage(
+        () => window.codedApi.leaveConversation(state.token, selectedConversation.id),
+        "Leaving group chat..."
+      );
+      state.selectedConversationId = null;
+      state.selectedUsername = "";
+      state.messages = [];
+      await refreshSocialData();
+      setChatStatus("Left group chat.");
+    } catch (err) {
+      setChatStatus(normalizeErrorMessage(err));
+    } finally {
+      setButtonBusy(els.leaveGroupBtn, false, "Leave Group", "");
     }
   });
 

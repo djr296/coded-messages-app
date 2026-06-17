@@ -1,6 +1,6 @@
 # Coded Messages App
 
-Windows desktop chat app with account auth, friend requests, persisted 1:1 conversations, coded-message display, optional plain-text sending, profiles, presence, and file attachments.
+Windows desktop chat app with account auth, friend requests, persisted direct and group conversations, coded-message display, optional plain-text sending, profiles, presence, and file attachments.
 
 ## Current Status
 
@@ -26,6 +26,8 @@ The current public release target is focused on:
 - Cancel outgoing requests
 - Remove friend
 - 1:1 conversations with persisted message history
+- Group chats with friend invites
+- Leave group chat
 - Per-message send mode: `Encoded` or `Plain text`
 - Message timestamps in chat
 - Background multi-device message synchronization

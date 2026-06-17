@@ -109,6 +109,65 @@ test("authorization, blocking, attachments, and sessions", async (t) => {
   );
   assert.equal(validAttachment.status, 200);
 
+  const secondFriendRequest = await request(baseUrl, "/friends/request", {
+    method: "POST",
+    token: alice.token,
+    body: { username: "charlie" }
+  });
+  assert.equal(secondFriendRequest.status, 200);
+
+  const charlieIncoming = await request(baseUrl, "/friends/requests", { token: charlie.token });
+  assert.equal(charlieIncoming.status, 200);
+  assert.equal(charlieIncoming.payload.requests.length, 1);
+
+  const charlieAccepted = await request(
+    baseUrl,
+    `/friends/request/${charlieIncoming.payload.requests[0].id}/accept`,
+    { method: "POST", token: charlie.token }
+  );
+  assert.equal(charlieAccepted.status, 200);
+
+  const group = await request(baseUrl, "/conversations/groups", {
+    method: "POST",
+    token: alice.token,
+    body: { title: "Launch Crew", member_ids: [bob.user.id, charlie.user.id] }
+  });
+  assert.equal(group.status, 200);
+  assert.ok(group.payload.conversation_id);
+
+  const groupMessage = await request(
+    baseUrl,
+    `/conversations/${group.payload.conversation_id}/messages`,
+    {
+      method: "POST",
+      token: alice.token,
+      body: { body: "group hello", display_mode: "plain" }
+    }
+  );
+  assert.equal(groupMessage.status, 200);
+
+  const bobGroupRead = await request(
+    baseUrl,
+    `/conversations/${group.payload.conversation_id}/messages`,
+    { token: bob.token }
+  );
+  assert.equal(bobGroupRead.status, 200);
+  assert.equal(bobGroupRead.payload.messages.length, 1);
+
+  const charlieLeave = await request(
+    baseUrl,
+    `/conversations/${group.payload.conversation_id}/members/me`,
+    { method: "DELETE", token: charlie.token }
+  );
+  assert.equal(charlieLeave.status, 200);
+
+  const charlieGroupRead = await request(
+    baseUrl,
+    `/conversations/${group.payload.conversation_id}/messages`,
+    { token: charlie.token }
+  );
+  assert.equal(charlieGroupRead.status, 403);
+
   const report = await request(baseUrl, `/reports/${bob.user.id}`, {
     method: "POST",
     token: alice.token,

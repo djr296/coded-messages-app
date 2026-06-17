@@ -58,6 +58,9 @@ Status values:
 - [ ] `NOT TESTED` Active sessions appear and another session can be revoked
 - [ ] `NOT TESTED` Revoked session must sign in again
 - [ ] `NOT TESTED` Oversized or unsupported attachments show a clear error
+- [ ] `NOT TESTED` Create a group chat with existing friends
+- [ ] `NOT TESTED` Send a group message and confirm all members can read it
+- [ ] `NOT TESTED` Leave a group and confirm it disappears from that account
 
 ## Release Gate
 

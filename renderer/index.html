@@ -64,6 +64,14 @@
         </section>
 
         <section class="side-section">
+          <h3>New Group</h3>
+          <input id="group-title-input" type="text" placeholder="Group name" />
+          <div id="group-friend-list" class="group-friend-list"></div>
+          <button id="group-create-btn" class="small" type="button">Create Group</button>
+          <p id="group-status" class="status"></p>
+        </section>
+
+        <section class="side-section">
           <h3>Requests</h3>
           <div id="request-list" class="request-list"></div>
         </section>
@@ -84,10 +92,11 @@
         <section id="chat-view" class="view active">
           <header class="view-header">
             <div class="chat-header-row">
-              <h1 id="chat-title">Select a friend</h1>
+              <h1 id="chat-title">Select a chat</h1>
               <div class="chat-header-actions">
                 <button id="report-user-btn" class="muted-btn small hidden" type="button">Report</button>
                 <button id="block-user-btn" class="danger-btn small hidden" type="button">Block</button>
+                <button id="leave-group-btn" class="muted-btn small hidden" type="button">Leave Group</button>
                 <button id="remove-friend-btn" class="muted-btn small hidden" type="button">Remove Friend</button>
               </div>
             </div>

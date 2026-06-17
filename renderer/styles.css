@@ -167,6 +167,29 @@ body {
   overflow-y: auto;
 }
 
+.group-friend-list {
+  display: grid;
+  gap: 6px;
+  max-height: 130px;
+  overflow-y: auto;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.group-friend-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.group-friend-option input {
+  margin: 0;
+}
+
 .request-card {
   border: 1px solid var(--border);
   border-radius: 10px;
