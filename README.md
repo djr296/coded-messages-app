@@ -4,17 +4,19 @@ Windows desktop chat app with account auth, friend requests, persisted direct an
 
 ## Current Status
 
-This project is ready for the first public `v1.0.0` Windows release. The desktop app, installer, multi-device chat, and hosted backend are working.
+This project has a working Windows release with desktop install, multi-device chat, and a hosted backend.
 
-Email-based account features are temporarily out of scope for `v1.0.0`.
+Email-based account features are temporarily out of scope for the current public release.
 
-The current public release target is focused on:
+The current public release is focused on:
 
 - account creation and login
 - friend management
 - coded/plain-text chat
 - multi-device sync
 - Windows install experience
+
+Firebase migration setup has started. See `docs/FIREBASE_MIGRATION.md` for the migration plan and current Firebase project notes.
 
 ## Features
 
@@ -49,7 +51,7 @@ Use the installer from the GitHub release page, not the green `Code` button on t
 1. Open the repository on GitHub.
 2. On the right side, click `Releases`.
 3. Open the latest release.
-4. Under `Assets`, download `Coded Messages Setup 1.0.0.exe` or the newest installer version listed there.
+4. Under `Assets`, download the newest `Coded Messages Setup ...exe` installer version listed there.
 5. Run the installer.
 6. If Windows shows a warning, click `More info` and then `Run anyway` if you trust the release source.
 7. Finish installation and open `Coded Messages` from the Start menu or desktop shortcut.
@@ -70,7 +72,9 @@ If there is no published GitHub Release yet, the installer has not been posted p
 - Database:
   - Local mode: SQLite via `sql.js`
   - Hosted mode: Postgres
+  - Firebase migration: Cloud Firestore planned
 - Auth: JWT + bcryptjs
+  - Firebase migration: Firebase Auth planned
 - Email: deferred for the current public release
 
 ## Project structure
@@ -83,6 +87,7 @@ If there is no published GitHub Release yet, the installer has not been posted p
 - `server/mailer.js`: deferred email provider integration kept for future account-email work
 - `docs/EMAIL_SETUP.md`: email provider overview and hosted setup notes
 - `docs/GOOGLE_MAIL_WEBHOOK.md`: setup guide for the Google Apps Script mail webhook
+- `docs/FIREBASE_MIGRATION.md`: Firebase migration plan and project notes
 - `renderer/index.html`: UI markup
 - `renderer/styles.css`: UI styles
 - `renderer/app.js`: frontend logic
