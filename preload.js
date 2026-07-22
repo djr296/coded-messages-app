@@ -212,31 +212,76 @@ async function firestoreDelete(path, idToken = firebaseAuthState && firebaseAuth
   return { ok: true };
 }
 
-async function firestoreQuery(collectionId, filters = [], orderBy = []) {
-  const auth = await requireFirebaseAuth();
-  const structuredQuery = {
-    from: [{ collectionId }],
-    where: filters.length
-      ? {
-          compositeFilter: {
-            op: "AND",
-            filters: filters.map(([field, op, value]) => ({
-              fieldFilter: {
-                field: { fieldPath: field },
-                op,
-                value: firestoreValue(value)
-              }
-            }))
-          }
+async function firestoreAppendMissing(path, fieldPath, values, idToken = firebaseAuthState && firebaseAuthState.idToken) {
+  const documentPath = `projects/${firebaseConfig.projectId}/databases/(default)/documents/${path}`;
+  const response = await fetch(`https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents:commit`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${idToken}`
+    },
+    body: JSON.stringify({
+      writes: [{
+        transform: {
+          document: documentPath,
+          fieldTransforms: [{
+            fieldPath,
+            appendMissingElements: {
+              values: values.map((value) => firestoreValue(value))
+            }
+          }]
         }
-      : undefined,
-    orderBy: orderBy.map(([field, direction]) => ({
-      field: { fieldPath: field },
-      direction
-    }))
+      }]
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload && payload.error ? payload.error.message : "Could not update Firebase data.";
+    throw new Error(message);
+  }
+  return payload;
+}
+
+function buildStructuredQuery(collectionId, filters = [], orderBy = []) {
+  const structuredQuery = {
+    from: [{ collectionId }]
   };
 
-  const response = await fetch(`${FIRESTORE_BASE}:runQuery`, {
+  if (filters.length) {
+    const queryFilters = filters.map(([field, op, value]) => ({
+      fieldFilter: {
+        field: { fieldPath: field },
+        op,
+        value: firestoreValue(value)
+      }
+    }));
+
+    structuredQuery.where = queryFilters.length === 1
+      ? queryFilters[0]
+      : {
+          compositeFilter: {
+            op: "AND",
+            filters: queryFilters
+          }
+        };
+  }
+
+  if (orderBy.length) {
+    structuredQuery.orderBy = orderBy.map(([field, direction]) => ({
+      field: { fieldPath: field },
+      direction
+    }));
+  }
+
+  return structuredQuery;
+}
+
+async function firestoreQueryAt(parentPath, collectionId, filters = [], orderBy = []) {
+  const auth = await requireFirebaseAuth();
+  const structuredQuery = buildStructuredQuery(collectionId, filters, orderBy);
+  const parent = parentPath ? `/${parentPath}` : "";
+
+  const response = await fetch(`${FIRESTORE_BASE}${parent}:runQuery`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -246,7 +291,9 @@ async function firestoreQuery(collectionId, filters = [], orderBy = []) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = payload && payload.error ? payload.error.message : "Could not query Firebase data.";
+    const message = payload && payload.error
+      ? payload.error.message
+      : `Could not query Firebase data. Firebase returned HTTP ${response.status}.`;
     throw new Error(message);
   }
   return payload
@@ -255,6 +302,10 @@ async function firestoreQuery(collectionId, filters = [], orderBy = []) {
       id: docId(row.document.name),
       fields: row.document.fields || {}
     }));
+}
+
+async function firestoreQuery(collectionId, filters = [], orderBy = []) {
+  return firestoreQueryAt("", collectionId, filters, orderBy);
 }
 
 async function mirrorProfileToFirestore(user, authState = firebaseAuthState) {
@@ -413,6 +464,68 @@ async function getFirebaseUser(uid) {
   return userFromFirebaseProfile(doc.fields || {}, uid);
 }
 
+function conversationFromFields(id, fields) {
+  return {
+    id,
+    title: firestoreScalar(fields.title) || "",
+    type: firestoreScalar(fields.type) || "direct",
+    created_by_user_id: firestoreScalar(fields.created_by_user_id),
+    created_at: firestoreScalar(fields.created_at),
+    updated_at: firestoreScalar(fields.updated_at),
+    member_ids: firestoreScalar(fields.member_ids) || []
+  };
+}
+
+async function putUserConversation(auth, uid, conversationId, conversation) {
+  await firestorePatch(
+    `userConversations/${encodeURIComponent(uid)}/items/${encodeURIComponent(conversationId)}`,
+    auth.idToken,
+    {
+      conversation_id: conversationId,
+      title: conversation.title || "",
+      type: conversation.type || "direct",
+      created_by_user_id: conversation.created_by_user_id || auth.localId,
+      member_ids: conversation.member_ids || [],
+      created_at: conversation.created_at || nowIso(),
+      updated_at: conversation.updated_at || nowIso(),
+      invite_version: conversation.invite_version || "0"
+    }
+  );
+}
+
+async function putConversationForMembers(auth, conversationId, conversation) {
+  for (const uid of conversation.member_ids || []) {
+    await putUserConversation(auth, uid, conversationId, conversation);
+  }
+}
+
+async function deleteUserConversation(uid, conversationId) {
+  await firestoreDelete(
+    `userConversations/${encodeURIComponent(uid)}/items/${encodeURIComponent(conversationId)}`
+  ).catch(() => null);
+}
+
+async function putFriendView(auth, ownerUid, friendUid, friendshipId, conversationId, createdAt) {
+  await firestorePatch(
+    `userFriends/${encodeURIComponent(ownerUid)}/items/${encodeURIComponent(friendUid)}`,
+    auth.idToken,
+    {
+      friend_uid: friendUid,
+      friendship_id: friendshipId,
+      conversation_id: conversationId,
+      created_at: createdAt
+    }
+  );
+}
+
+async function putFriendRequestView(auth, ownerUid, box, requestId, requestData) {
+  await firestorePatch(
+    `userFriendRequests/${encodeURIComponent(ownerUid)}/${box}/${encodeURIComponent(requestId)}`,
+    auth.idToken,
+    requestData
+  );
+}
+
 async function findFirebaseUserByUsername(username) {
   const normalized = String(username || "").trim().toLowerCase();
   if (!normalized) {
@@ -442,21 +555,20 @@ async function firebaseHeartbeat() {
 
 async function getFirebaseFriends() {
   const auth = await requireFirebaseAuth();
-  const rows = await firestoreQuery("friendships", [["user_ids", "ARRAY_CONTAINS", auth.localId]]);
+  const rows = await firestoreQueryAt(`userFriends/${encodeURIComponent(auth.localId)}`, "items");
   const friends = [];
   for (const row of rows) {
-    const userIds = firestoreScalar(row.fields.user_ids) || [];
-    const friendUid = userIds.find((uid) => uid !== auth.localId);
+    const friendUid = firestoreScalar(row.fields.friend_uid) || row.id;
     if (!friendUid) continue;
     const friend = await getFirebaseUser(friendUid);
     friends.push({
-      friendship_id: row.id,
+      friendship_id: firestoreScalar(row.fields.friendship_id),
       user_id: friend.id,
       username: friend.username,
       profile_image_path: friend.profile_image_path,
       last_seen_at: friend.last_seen_at,
       online: false,
-      conversation_id: pairId(auth.localId, friendUid)
+      conversation_id: firestoreScalar(row.fields.conversation_id) || pairId(auth.localId, friendUid)
     });
   }
   return { friends };
@@ -478,26 +590,31 @@ async function sendFirebaseFriendRequest(_token, username) {
     }
   }
   const requestId = `${auth.localId}_${target.id}`;
-  await firestorePatch(`friendRequests/${requestId}`, auth.idToken, {
+  const requestData = {
     from_uid: auth.localId,
     to_uid: target.id,
     status: "pending",
     created_at: nowIso(),
     responded_at: ""
-  });
+  };
+  await firestorePatch(`friendRequests/${requestId}`, auth.idToken, requestData);
+  await putFriendRequestView(auth, target.id, "incoming", requestId, requestData);
+  await putFriendRequestView(auth, auth.localId, "outgoing", requestId, requestData);
   return { ok: true };
 }
 
 async function getFirebaseFriendRequests() {
   const auth = await requireFirebaseAuth();
-  const incomingRows = await firestoreQuery("friendRequests", [
-    ["to_uid", "EQUAL", auth.localId],
-    ["status", "EQUAL", "pending"]
-  ]);
-  const outgoingRows = await firestoreQuery("friendRequests", [
-    ["from_uid", "EQUAL", auth.localId],
-    ["status", "EQUAL", "pending"]
-  ]);
+  const incomingRows = await firestoreQueryAt(
+    `userFriendRequests/${encodeURIComponent(auth.localId)}`,
+    "incoming",
+    [["status", "EQUAL", "pending"]]
+  );
+  const outgoingRows = await firestoreQueryAt(
+    `userFriendRequests/${encodeURIComponent(auth.localId)}`,
+    "outgoing",
+    [["status", "EQUAL", "pending"]]
+  );
   const requests = [];
   for (const row of incomingRows) {
     const fromUid = firestoreScalar(row.fields.from_uid);
@@ -539,6 +656,15 @@ async function acceptFirebaseFriendRequest(_token, requestId) {
     status: "accepted",
     responded_at: now
   });
+  const acceptedRequestData = {
+    from_uid: fromUid,
+    to_uid: toUid,
+    status: "accepted",
+    created_at: firestoreScalar(reqDoc.fields.created_at) || now,
+    responded_at: now
+  };
+  await putFriendRequestView(auth, toUid, "incoming", requestId, acceptedRequestData);
+  await putFriendRequestView(auth, fromUid, "outgoing", requestId, acceptedRequestData);
   await firestorePatch(`friendships/${friendshipId}`, auth.idToken, {
     user_a_id: friendshipId.split("_")[0],
     user_b_id: friendshipId.split("_")[1],
@@ -546,6 +672,17 @@ async function acceptFirebaseFriendRequest(_token, requestId) {
     created_at: now
   });
   await firestorePatch(`conversations/${friendshipId}`, auth.idToken, {
+    id: friendshipId,
+    type: "direct",
+    title: "",
+    member_ids: friendshipId.split("_"),
+    created_by_user_id: fromUid,
+    created_at: now,
+    updated_at: now
+  });
+  await putFriendView(auth, fromUid, toUid, friendshipId, friendshipId, now);
+  await putFriendView(auth, toUid, fromUid, friendshipId, friendshipId, now);
+  await putConversationForMembers(auth, friendshipId, {
     id: friendshipId,
     type: "direct",
     title: "",
@@ -565,10 +702,20 @@ async function updateFirebaseFriendRequest(_token, requestId, status) {
   if ((status === "declined" && toUid !== auth.localId) || (status === "cancelled" && fromUid !== auth.localId)) {
     throw new Error("Friend request not found.");
   }
+  const respondedAt = nowIso();
   await firestorePatch(`friendRequests/${encodeURIComponent(requestId)}`, auth.idToken, {
     status,
-    responded_at: nowIso()
+    responded_at: respondedAt
   });
+  const requestData = {
+    from_uid: fromUid,
+    to_uid: toUid,
+    status,
+    created_at: firestoreScalar(reqDoc.fields.created_at) || "",
+    responded_at: respondedAt
+  };
+  await putFriendRequestView(auth, toUid, "incoming", requestId, requestData);
+  await putFriendRequestView(auth, fromUid, "outgoing", requestId, requestData);
   return { ok: true };
 }
 
@@ -577,27 +724,33 @@ async function removeFirebaseFriend(_token, userId) {
   const id = pairId(auth.localId, userId);
   await firestoreDelete(`friendships/${id}`);
   await firestoreDelete(`conversations/${id}`).catch(() => null);
+  await firestoreDelete(`userFriends/${encodeURIComponent(auth.localId)}/items/${encodeURIComponent(userId)}`).catch(() => null);
+  await firestoreDelete(`userFriends/${encodeURIComponent(userId)}/items/${encodeURIComponent(auth.localId)}`).catch(() => null);
+  await deleteUserConversation(auth.localId, id);
+  await deleteUserConversation(userId, id);
   return { ok: true };
 }
 
 async function getFirebaseConversations() {
   const auth = await requireFirebaseAuth();
-  const rows = await firestoreQuery("conversations", [["member_ids", "ARRAY_CONTAINS", auth.localId]]);
+  const rows = await firestoreQueryAt(`userConversations/${encodeURIComponent(auth.localId)}`, "items");
   const conversations = [];
   for (const row of rows) {
-    const memberIds = firestoreScalar(row.fields.member_ids) || [];
+    const conversationId = firestoreScalar(row.fields.conversation_id) || row.id;
+    const conversation = conversationFromFields(conversationId, row.fields);
+    const memberIds = conversation.member_ids;
     const members = [];
     for (const uid of memberIds) {
       members.push(await getFirebaseUser(uid));
     }
-    const type = firestoreScalar(row.fields.type) || "direct";
+    const type = conversation.type;
     const other = type === "direct" ? members.find((member) => member.id !== auth.localId) : null;
     conversations.push({
-      id: row.id,
-      title: firestoreScalar(row.fields.title) || "",
+      id: conversationId,
+      title: conversation.title,
       type,
-      created_by_user_id: firestoreScalar(row.fields.created_by_user_id),
-      created_at: firestoreScalar(row.fields.created_at),
+      created_by_user_id: conversation.created_by_user_id,
+      created_at: conversation.created_at,
       members,
       other_user: other,
       last_message: null
@@ -619,13 +772,28 @@ async function createFirebaseGroupConversation(_token, title, memberIds) {
     member_ids: uniqueMembers,
     created_by_user_id: auth.localId,
     created_at: now,
+    updated_at: now,
+    invite_version: "0"
+  });
+  await putConversationForMembers(auth, conversationId, {
+    id: conversationId,
+    type: "group",
+    title: String(title || "Group Chat").trim() || "Group Chat",
+    member_ids: uniqueMembers,
+    created_by_user_id: auth.localId,
+    created_at: now,
     updated_at: now
   });
   return { conversation_id: conversationId };
 }
 
 async function getFirebaseMessages(_token, conversationId) {
-  const rows = await firestoreQuery("messages", [["conversation_id", "EQUAL", String(conversationId)]]);
+  const rows = await firestoreQueryAt(
+    `conversations/${encodeURIComponent(conversationId)}`,
+    "messages",
+    [],
+    [["created_at", "ASCENDING"]]
+  );
   const messages = [];
   for (const row of rows) {
     const senderId = firestoreScalar(row.fields.sender_id);
@@ -654,7 +822,7 @@ async function sendFirebaseMessage(_token, conversationId, body, displayMode = "
   const auth = await requireFirebaseAuth();
   const messageId = `msg_${Date.now()}_${randomId(8)}`;
   const now = nowIso();
-  await firestorePatch(`messages/${messageId}`, auth.idToken, {
+  await firestorePatch(`conversations/${encodeURIComponent(conversationId)}/messages/${messageId}`, auth.idToken, {
     conversation_id: String(conversationId),
     sender_id: auth.localId,
     body: String(body || ""),
@@ -667,6 +835,12 @@ async function sendFirebaseMessage(_token, conversationId, body, displayMode = "
   await firestorePatch(`conversations/${encodeURIComponent(conversationId)}`, auth.idToken, {
     updated_at: now
   }).catch(() => null);
+  const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`).catch(() => null);
+  if (conversation && conversation.fields) {
+    const conversationData = conversationFromFields(String(conversationId), conversation.fields);
+    conversationData.updated_at = now;
+    await putConversationForMembers(auth, String(conversationId), conversationData).catch(() => null);
+  }
   const user = await getFirebaseUser(auth.localId);
   return {
     message: {
@@ -690,6 +864,7 @@ async function createFirebaseGroupInvite(_token, conversationId, expiresIn = "24
   if (firestoreScalar(conversation.fields.created_by_user_id) !== auth.localId) {
     throw new Error("Only the group creator can create invite links.");
   }
+  const inviteVersion = firestoreScalar(conversation.fields.invite_version) || "0";
   const token = randomId(32);
   const now = nowIso();
   const expiresAt = expiresIn === "never"
@@ -698,7 +873,9 @@ async function createFirebaseGroupInvite(_token, conversationId, expiresIn = "24
   await firestorePatch(`groupInvites/${token}`, auth.idToken, {
     token,
     conversation_id: String(conversationId),
+    conversation_title: firestoreScalar(conversation.fields.title) || "Group Chat",
     created_by_user_id: auth.localId,
+    invite_version: inviteVersion,
     expires_at: expiresAt,
     revoked_at: "",
     created_at: now
@@ -713,16 +890,16 @@ async function createFirebaseGroupInvite(_token, conversationId, expiresIn = "24
 
 async function revokeFirebaseGroupInvites(_token, conversationId) {
   const auth = await requireFirebaseAuth();
-  const rows = await firestoreQuery("groupInvites", [
-    ["conversation_id", "EQUAL", String(conversationId)],
-    ["revoked_at", "EQUAL", ""]
-  ]);
-  const now = nowIso();
-  for (const row of rows) {
-    if (firestoreScalar(row.fields.created_by_user_id) === auth.localId) {
-      await firestorePatch(`groupInvites/${row.id}`, auth.idToken, { revoked_at: now });
-    }
+  const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
+  if (firestoreScalar(conversation.fields.created_by_user_id) !== auth.localId) {
+    throw new Error("Only the group creator can turn off invite links.");
   }
+  const now = nowIso();
+  await firestorePatch(`conversations/${encodeURIComponent(conversationId)}`, auth.idToken, {
+    invite_version: randomId(12),
+    invite_revoked_at: now,
+    updated_at: now
+  });
   return { ok: true };
 }
 
@@ -735,31 +912,61 @@ async function getFirebaseGroupInvite(_token, inviteToken) {
     throw new Error("Invite link is invalid or expired.");
   }
   const conversationId = firestoreScalar(invite.fields.conversation_id);
-  const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
-  const memberIds = firestoreScalar(conversation.fields.member_ids) || [];
+  const inviteVersion = firestoreScalar(invite.fields.invite_version) || "0";
+  let alreadyMember = false;
+  try {
+    const userConversation = await firestoreGet(
+      `userConversations/${encodeURIComponent(auth.localId)}/items/${encodeURIComponent(conversationId)}`
+    );
+    alreadyMember = !!userConversation.fields;
+    const conversationInviteVersion = firestoreScalar(userConversation.fields.invite_version) || inviteVersion;
+    if (conversationInviteVersion !== inviteVersion) {
+      throw new Error("Invite link is invalid or expired.");
+    }
+  } catch (err) {
+    if (!String(err.message || "").toLowerCase().includes("not found")) {
+      throw err;
+    }
+  }
   return {
     invite: {
       conversation_id: conversationId,
-      title: firestoreScalar(conversation.fields.title) || "Group Chat",
+      title: firestoreScalar(invite.fields.conversation_title) || "Group Chat",
       expires_at: expiresAt || null,
-      already_member: memberIds.includes(auth.localId)
+      already_member: alreadyMember
     }
   };
 }
 
 async function joinFirebaseGroupInvite(_token, inviteToken) {
   const auth = await requireFirebaseAuth();
-  const lookup = await getFirebaseGroupInvite(_token, inviteToken);
-  const conversationId = lookup.invite.conversation_id;
-  const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
-  const memberIds = firestoreScalar(conversation.fields.member_ids) || [];
-  if (!memberIds.includes(auth.localId)) {
-    memberIds.push(auth.localId);
-    await firestorePatch(`conversations/${encodeURIComponent(conversationId)}`, auth.idToken, {
-      member_ids: memberIds,
-      updated_at: nowIso()
-    });
+  const invite = await firestoreGet(`groupInvites/${encodeURIComponent(inviteToken)}`);
+  const revokedAt = firestoreScalar(invite.fields.revoked_at);
+  const expiresAt = firestoreScalar(invite.fields.expires_at);
+  if (revokedAt || (expiresAt && new Date(expiresAt).getTime() < Date.now())) {
+    throw new Error("Invite link is invalid or expired.");
   }
+  const conversationId = firestoreScalar(invite.fields.conversation_id);
+  const now = nowIso();
+  await firestoreAppendMissing(
+    `conversations/${encodeURIComponent(conversationId)}`,
+    "member_ids",
+    [auth.localId],
+    auth.idToken
+  );
+  await firestorePatch(`conversations/${encodeURIComponent(conversationId)}`, auth.idToken, {
+    updated_at: now
+  });
+  const updatedConversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
+  const inviteVersion = firestoreScalar(invite.fields.invite_version) || "0";
+  const conversationInviteVersion = firestoreScalar(updatedConversation.fields.invite_version) || "0";
+  if (inviteVersion !== conversationInviteVersion) {
+    throw new Error("Invite link is invalid or expired.");
+  }
+  await putUserConversation(auth, auth.localId, conversationId, {
+    ...conversationFromFields(conversationId, updatedConversation.fields),
+    invite_version: conversationInviteVersion
+  });
   return { ok: true, conversation_id: conversationId };
 }
 
@@ -771,16 +978,23 @@ async function leaveFirebaseConversation(_token, conversationId) {
     member_ids: memberIds,
     updated_at: nowIso()
   });
+  await deleteUserConversation(auth.localId, conversationId);
   return { ok: true };
 }
 
 async function blockFirebaseUser(_token, userId) {
   const auth = await requireFirebaseAuth();
-  await firestorePatch(`blocks/${pairId(auth.localId, userId)}`, auth.idToken, {
+  const blockData = {
     blocker_user_id: auth.localId,
     blocked_user_id: String(userId),
     created_at: nowIso()
-  });
+  };
+  await firestorePatch(`blocks/${pairId(auth.localId, userId)}`, auth.idToken, blockData);
+  await firestorePatch(
+    `userBlocks/${encodeURIComponent(auth.localId)}/items/${encodeURIComponent(userId)}`,
+    auth.idToken,
+    blockData
+  );
   await removeFirebaseFriend(_token, userId).catch(() => null);
   return { ok: true };
 }
@@ -788,12 +1002,13 @@ async function blockFirebaseUser(_token, userId) {
 async function unblockFirebaseUser(_token, userId) {
   const auth = await requireFirebaseAuth();
   await firestoreDelete(`blocks/${pairId(auth.localId, userId)}`).catch(() => null);
+  await firestoreDelete(`userBlocks/${encodeURIComponent(auth.localId)}/items/${encodeURIComponent(userId)}`).catch(() => null);
   return { ok: true };
 }
 
 async function getFirebaseBlockedUsers() {
   const auth = await requireFirebaseAuth();
-  const rows = await firestoreQuery("blocks", [["blocker_user_id", "EQUAL", auth.localId]]);
+  const rows = await firestoreQueryAt(`userBlocks/${encodeURIComponent(auth.localId)}`, "items");
   const blocked = [];
   for (const row of rows) {
     const uid = firestoreScalar(row.fields.blocked_user_id);

@@ -10,6 +10,11 @@ service cloud.firestore {
       return signedIn() && uids is list && uids.hasAny([request.auth.uid]);
     }
 
+    function isConversationMember(conversationId) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/userConversations/$(request.auth.uid)/items/$(conversationId));
+    }
+
     match /users/{userId} {
       allow read: if signedIn();
       allow create, update: if signedIn()
@@ -33,40 +38,95 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /userFriends/{userId}/items/{friendId} {
+      allow read, list: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && request.resource.data.friend_uid is string
+        && request.resource.data.friendship_id is string
+        && request.resource.data.conversation_id is string
+        && (
+          request.auth.uid == userId
+          || request.resource.data.friend_uid == request.auth.uid
+        );
+      allow delete: if signedIn()
+        && (
+          request.auth.uid == userId
+          || resource.data.friend_uid == request.auth.uid
+        );
+    }
+
+    match /userFriendRequests/{userId}/{box}/{requestId} {
+      allow read, list: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && box in ["incoming", "outgoing"]
+        && request.resource.data.from_uid is string
+        && request.resource.data.to_uid is string
+        && (
+          request.auth.uid == userId
+          || request.resource.data.from_uid == request.auth.uid
+          || request.resource.data.to_uid == request.auth.uid
+        );
+      allow delete: if false;
+    }
+
+    match /userConversations/{userId}/items/{conversationId} {
+      allow read, list: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && request.resource.data.member_ids is list
+        && request.resource.data.member_ids.hasAny([userId])
+        && request.resource.data.member_ids.hasAny([request.auth.uid]);
+      allow delete: if signedIn()
+        && (
+          request.auth.uid == userId
+          || hasUid(resource.data.member_ids)
+        );
+    }
+
+    match /userBlocks/{userId}/items/{blockedId} {
+      allow read, list: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.blocker_user_id == request.auth.uid;
+      allow delete: if signedIn() && request.auth.uid == userId;
+    }
+
     match /friendRequests/{requestId} {
-      allow read: if signedIn()
+      allow get: if signedIn()
         && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid);
-      allow create: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && request.resource.data.from_uid == request.auth.uid;
       allow update: if signedIn()
         && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid);
       allow delete: if false;
     }
 
     match /friendships/{friendshipId} {
-      allow read: if hasUid(resource.data.user_ids);
+      allow get: if hasUid(resource.data.user_ids);
+      allow list: if false;
       allow create: if hasUid(request.resource.data.user_ids);
       allow update, delete: if hasUid(resource.data.user_ids);
     }
 
     match /conversations/{conversationId} {
-      allow read: if hasUid(resource.data.member_ids);
+      allow get: if hasUid(resource.data.member_ids) || isConversationMember(conversationId);
+      allow list: if false;
       allow create: if hasUid(request.resource.data.member_ids)
         && request.resource.data.member_ids.hasAny([request.resource.data.created_by_user_id]);
       allow update: if hasUid(resource.data.member_ids) || hasUid(request.resource.data.member_ids);
       allow delete: if hasUid(resource.data.member_ids);
-    }
 
-    match /messages/{messageId} {
-      allow read: if signedIn()
-        && hasUid(get(/databases/$(database)/documents/conversations/$(resource.data.conversation_id)).data.member_ids);
-      allow create: if signedIn()
-        && request.resource.data.sender_id == request.auth.uid
-        && hasUid(get(/databases/$(database)/documents/conversations/$(request.resource.data.conversation_id)).data.member_ids);
-      allow update, delete: if false;
+      match /messages/{messageId} {
+        allow read, list: if isConversationMember(conversationId);
+        allow create: if isConversationMember(conversationId)
+          && request.resource.data.sender_id == request.auth.uid;
+        allow update, delete: if false;
+      }
     }
 
     match /groupInvites/{inviteId} {
-      allow read: if signedIn();
+      allow get: if signedIn();
+      allow list: if false;
       allow create: if signedIn()
         && request.resource.data.created_by_user_id == request.auth.uid;
       allow update: if signedIn()
@@ -75,8 +135,9 @@ service cloud.firestore {
     }
 
     match /blocks/{blockId} {
-      allow read: if signedIn()
+      allow get: if signedIn()
         && (resource.data.blocker_user_id == request.auth.uid || resource.data.blocked_user_id == request.auth.uid);
+      allow list: if false;
       allow create: if signedIn()
         && request.resource.data.blocker_user_id == request.auth.uid;
       allow update: if false;

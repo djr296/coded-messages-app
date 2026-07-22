@@ -954,12 +954,12 @@ async function bootstrap() {
     await refreshAccountSettings();
     showAuth(false);
     startBackgroundSync();
-  } catch (_err) {
+  } catch (err) {
     setToken("");
     state.me = null;
     clearDecrypter();
     showAuth(true);
-    els.authError.textContent = "Session expired or the server could not be reached. Sign in again.";
+    els.authError.textContent = normalizeErrorMessage(err, "Session expired or Firebase data could not be loaded. Sign in again.");
   }
 }
 
