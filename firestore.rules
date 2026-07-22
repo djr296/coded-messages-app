@@ -2,6 +2,25 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly([
+          "app_user_id",
+          "email",
+          "username",
+          "profile_image_path",
+          "last_seen_at",
+          "updated_at"
+        ])
+        && request.resource.data.email is string
+        && request.resource.data.username is string
+        && request.resource.data.profile_image_path is string
+        && request.resource.data.updated_at is string;
+      allow delete: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

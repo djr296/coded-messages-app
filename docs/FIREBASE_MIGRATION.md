@@ -15,8 +15,8 @@ Do not delete Render or Supabase until the Firebase version has passed full two-
 
 1. Add Firebase project files and client config. Done.
 2. Move account creation and login to Firebase Auth. In progress: the app now uses Firebase Auth and exchanges Firebase ID tokens for current app sessions.
-3. Add Firestore collections and security rules.
-4. Move profile and presence data.
+3. Add Firestore collections and security rules. In progress: owner-writable `users/{uid}` profile documents are allowed.
+4. Move profile and presence data. In progress: profiles are mirrored to Firestore after Firebase login/register and profile saves.
 5. Move friend requests, friendships, blocks, and reports.
 6. Move direct messages.
 7. Move group chats and invite links.

@@ -4,6 +4,8 @@ const { firebaseConfig } = require("./shared/firebase-config");
 
 const API_BASE = process.env.CODED_MESSAGES_API_BASE || "http://127.0.0.1:3847";
 const FIREBASE_AUTH_BASE = "https://identitytoolkit.googleapis.com/v1";
+const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
+let firebaseAuthState = null;
 
 function firebaseErrorMessage(code) {
   switch (code) {
@@ -23,6 +25,27 @@ function firebaseErrorMessage(code) {
     default:
       return code ? code.replace(/_/g, " ").toLowerCase() : "Firebase authentication failed.";
   }
+}
+
+function firestoreValue(value) {
+  if (value === null || value === undefined) {
+    return { nullValue: null };
+  }
+  if (typeof value === "boolean") {
+    return { booleanValue: value };
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value)
+      ? { integerValue: String(value) }
+      : { doubleValue: value };
+  }
+  return { stringValue: String(value) };
+}
+
+function firestoreFields(object) {
+  return Object.fromEntries(
+    Object.entries(object).map(([key, value]) => [key, firestoreValue(value)])
+  );
 }
 
 async function request(path, { method = "GET", token, body } = {}) {
@@ -61,14 +84,59 @@ async function firebaseAuthRequest(endpoint, body) {
   return payload;
 }
 
+async function firestorePatch(path, idToken, data) {
+  const updateMask = Object.keys(data)
+    .map((key) => `updateMask.fieldPaths=${encodeURIComponent(key)}`)
+    .join("&");
+  const response = await fetch(`${FIRESTORE_BASE}/${path}?${updateMask}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${idToken}`
+    },
+    body: JSON.stringify({ fields: firestoreFields(data) })
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = payload && payload.error ? payload.error.message : "Could not update Firebase profile.";
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function mirrorProfileToFirestore(user, authState = firebaseAuthState) {
+  if (!authState || !authState.idToken || !authState.localId || !user) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await firestorePatch(`users/${encodeURIComponent(authState.localId)}`, authState.idToken, {
+    app_user_id: Number(user.id),
+    email: user.email || authState.email || "",
+    username: user.username || "",
+    profile_image_path: user.profile_image_path || "",
+    last_seen_at: user.last_seen_at || "",
+    updated_at: now
+  });
+}
+
 async function createAppSessionFromFirebase(firebasePayload, username = "") {
-  return request("/auth/firebase-session", {
+  const session = await request("/auth/firebase-session", {
     method: "POST",
     body: {
       id_token: firebasePayload.idToken,
       username
     }
   });
+  firebaseAuthState = {
+    idToken: firebasePayload.idToken,
+    refreshToken: firebasePayload.refreshToken || "",
+    localId: firebasePayload.localId || "",
+    email: firebasePayload.email || ""
+  };
+  await mirrorProfileToFirestore(session.user, firebaseAuthState);
+  return session;
 }
 
 async function deleteFirebaseAccount(idToken) {
@@ -102,6 +170,22 @@ async function loginWithFirebase({ email, password }) {
   return createAppSessionFromFirebase(firebasePayload);
 }
 
+async function logoutEverywhere(token) {
+  try {
+    if (token) {
+      await request("/auth/logout", { method: "POST", token });
+    }
+  } finally {
+    firebaseAuthState = null;
+  }
+}
+
+async function updateProfileEverywhere(token, data) {
+  const response = await request("/me/profile", { method: "PATCH", token, body: data });
+  await mirrorProfileToFirestore(response.user);
+  return response;
+}
+
 contextBridge.exposeInMainWorld("codedMessages", {
   encode: codec.encode,
   decode: codec.decode
@@ -113,10 +197,10 @@ contextBridge.exposeInMainWorld("codedApi", {
   authProvider: "firebase",
   register: (data) => registerWithFirebase(data),
   login: (data) => loginWithFirebase(data),
-  logout: (token) => request("/auth/logout", { method: "POST", token }),
+  logout: (token) => logoutEverywhere(token),
   getMe: (token) => request("/me", { token }),
   heartbeat: (token) => request("/me/heartbeat", { method: "POST", token }),
-  updateProfile: (token, data) => request("/me/profile", { method: "PATCH", token, body: data }),
+  updateProfile: (token, data) => updateProfileEverywhere(token, data),
   getSessions: (token) => request("/sessions", { token }),
   revokeSession: (token, sessionId) => request(`/sessions/${sessionId}`, { method: "DELETE", token }),
   revokeOtherSessions: (token) => request("/sessions", { method: "DELETE", token }),
