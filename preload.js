@@ -580,12 +580,12 @@ async function sendFirebaseFriendRequest(_token, username) {
   if (target.id === auth.localId) {
     throw new Error("You cannot add yourself.");
   }
-  const friendshipId = pairId(auth.localId, target.id);
   try {
-    await firestoreGet(`friendships/${friendshipId}`);
+    await firestoreGet(`userFriends/${encodeURIComponent(auth.localId)}/items/${encodeURIComponent(target.id)}`);
     throw new Error("You are already friends.");
   } catch (err) {
-    if (!String(err.message || "").includes("not found")) {
+    const message = String(err.message || "").toLowerCase();
+    if (!message.includes("not found")) {
       throw err;
     }
   }
