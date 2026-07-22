@@ -3,11 +3,10 @@ const crypto = require("crypto");
 const codec = require("./shared/codec");
 const { firebaseConfig } = require("./shared/firebase-config");
 
-const API_BASE = process.env.CODED_MESSAGES_API_BASE || "http://127.0.0.1:3847";
 const FIREBASE_AUTH_BASE = "https://identitytoolkit.googleapis.com/v1";
+const FIREBASE_SECURE_TOKEN_BASE = "https://securetoken.googleapis.com/v1";
 const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
 let firebaseAuthState = null;
-let currentAuthProvider = "firebase";
 
 function nowIso() {
   return new Date().toISOString();
@@ -19,6 +18,30 @@ function randomId(bytes = 16) {
 
 function pairId(a, b) {
   return [String(a), String(b)].sort().join("_");
+}
+
+function encodeSessionToken(state) {
+  return Buffer.from(JSON.stringify({
+    provider: "firebase",
+    idToken: state.idToken || "",
+    refreshToken: state.refreshToken || "",
+    localId: state.localId || "",
+    email: state.email || "",
+    expiresAt: state.expiresAt || 0
+  }), "utf8").toString("base64url");
+}
+
+function decodeSessionToken(token) {
+  if (!token) {
+    return null;
+  }
+  try {
+    const session = JSON.parse(Buffer.from(String(token), "base64url").toString("utf8"));
+    if (session && session.provider === "firebase" && session.localId && session.refreshToken) {
+      return session;
+    }
+  } catch (_err) {}
+  return null;
 }
 
 function userFromFirebaseProfile(fields = {}, uid = "") {
@@ -97,26 +120,6 @@ function docId(name) {
   return String(name || "").split("/").pop();
 }
 
-async function request(path, { method = "GET", token, body } = {}) {
-  const headers = { "Content-Type": "application/json" };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-
-  const response = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || `Request failed: ${response.status}`);
-  }
-
-  return payload;
-}
-
 async function firebaseAuthRequest(endpoint, body) {
   const response = await fetch(`${FIREBASE_AUTH_BASE}/${endpoint}?key=${firebaseConfig.apiKey}`, {
     method: "POST",
@@ -131,6 +134,36 @@ async function firebaseAuthRequest(endpoint, body) {
   }
 
   return payload;
+}
+
+async function refreshFirebaseAuthState() {
+  if (!firebaseAuthState || !firebaseAuthState.refreshToken) {
+    throw new Error("Please sign in again.");
+  }
+  if (firebaseAuthState.expiresAt && firebaseAuthState.expiresAt > Date.now() + 60 * 1000) {
+    return firebaseAuthState;
+  }
+
+  const response = await fetch(`${FIREBASE_SECURE_TOKEN_BASE}/token?key=${firebaseConfig.apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: firebaseAuthState.refreshToken
+    }).toString()
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error("Session expired. Please sign in again.");
+  }
+  firebaseAuthState = {
+    idToken: payload.id_token || "",
+    refreshToken: payload.refresh_token || firebaseAuthState.refreshToken,
+    localId: payload.user_id || firebaseAuthState.localId,
+    email: payload.email || firebaseAuthState.email || "",
+    expiresAt: Date.now() + Number(payload.expires_in || 3600) * 1000
+  };
+  return firebaseAuthState;
 }
 
 async function firestorePatch(path, idToken, data) {
@@ -180,6 +213,7 @@ async function firestoreDelete(path, idToken = firebaseAuthState && firebaseAuth
 }
 
 async function firestoreQuery(collectionId, filters = [], orderBy = []) {
+  const auth = await requireFirebaseAuth();
   const structuredQuery = {
     from: [{ collectionId }],
     where: filters.length
@@ -206,7 +240,7 @@ async function firestoreQuery(collectionId, filters = [], orderBy = []) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${firebaseAuthState.idToken}`
+      Authorization: `Bearer ${auth.idToken}`
     },
     body: JSON.stringify({ structuredQuery })
   });
@@ -242,28 +276,24 @@ async function mirrorProfileToFirestore(user, authState = firebaseAuthState) {
   });
 }
 
-async function createAppSessionFromFirebase(firebasePayload, username = "") {
-  const session = await request("/auth/firebase-session", {
-    method: "POST",
-    body: {
-      id_token: firebasePayload.idToken,
-      username
-    }
-  });
+function setFirebaseAuthState(firebasePayload) {
   firebaseAuthState = {
     idToken: firebasePayload.idToken,
     refreshToken: firebasePayload.refreshToken || "",
     localId: firebasePayload.localId || "",
-    email: firebasePayload.email || ""
+    email: firebasePayload.email || "",
+    expiresAt: Date.now() + Number(firebasePayload.expiresIn || 3600) * 1000
   };
-  currentAuthProvider = "firebase";
-  const firebaseUser = {
-    ...session.user,
-    id: firebaseAuthState.localId,
-    app_user_id: session.user.id
+  return firebaseAuthState;
+}
+
+async function createFirebaseSessionResponse(user) {
+  const auth = await requireFirebaseAuth();
+  return {
+    token: encodeSessionToken(auth),
+    user,
+    auth_provider: "firebase"
   };
-  await mirrorProfileToFirestore(firebaseUser, firebaseAuthState);
-  return { ...session, user: firebaseUser };
 }
 
 async function deleteFirebaseAccount(idToken) {
@@ -275,113 +305,107 @@ async function deleteFirebaseAccount(idToken) {
 }
 
 async function registerWithFirebase({ email, password, username }) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const normalizedUsername = String(username || "").trim();
+  if (!normalizedEmail || !password || !normalizedUsername) {
+    throw new Error("Email, password, and username are required.");
+  }
+  if (password.length < 6) {
+    throw new Error("Password must be at least 6 characters.");
+  }
   const firebasePayload = await firebaseAuthRequest("accounts:signUp", {
-    email,
+    email: normalizedEmail,
     password,
     returnSecureToken: true
   });
+  setFirebaseAuthState(firebasePayload);
   try {
-    return await createAppSessionFromFirebase(firebasePayload, username);
+    const existingUsername = await firestoreQuery("users", [["username_lower", "EQUAL", normalizedUsername.toLowerCase()]]);
+    if (existingUsername.length) {
+      throw new Error("Username already taken.");
+    }
+    const user = {
+      id: firebaseAuthState.localId,
+      app_user_id: 0,
+      email: normalizedEmail,
+      username: normalizedUsername,
+      profile_image_path: "",
+      last_seen_at: "",
+      online: false
+    };
+    await mirrorProfileToFirestore(user, firebaseAuthState);
+    return createFirebaseSessionResponse(user);
   } catch (err) {
     await deleteFirebaseAccount(firebasePayload.idToken);
-    throw err;
-  }
-}
-
-function isInvalidFirebaseLoginError(error) {
-  return error && String(error.message || "") === "Invalid credentials.";
-}
-
-async function createFirebaseAccountForLegacyLogin({ email, password, username }) {
-  try {
-    return await firebaseAuthRequest("accounts:signUp", {
-      email,
-      password,
-      returnSecureToken: true
-    });
-  } catch (error) {
-    if (String(error.message || "") === "Email already in use.") {
-      throw new Error("This account exists in Firebase, but that password did not work. Check the password and try again.");
-    }
-    throw error;
-  }
-}
-
-async function migrateLegacyLoginToFirebase({ email, password }) {
-  const legacySession = await request("/auth/login", {
-    method: "POST",
-    body: { email, password }
-  });
-  let firebasePayload = null;
-  try {
-    firebasePayload = await createFirebaseAccountForLegacyLogin({
-      email,
-      password,
-      username: legacySession.user && legacySession.user.username
-    });
-    return await createAppSessionFromFirebase(
-      firebasePayload,
-      legacySession.user && legacySession.user.username
-    );
-  } catch (error) {
-    if (firebasePayload && firebasePayload.idToken) {
-      await deleteFirebaseAccount(firebasePayload.idToken);
-    }
     firebaseAuthState = null;
-    currentAuthProvider = "legacy";
-    return { ...legacySession, auth_provider: "legacy" };
+    throw err;
   }
 }
 
 async function loginWithFirebase({ email, password }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
-  let firebaseError = null;
+  const firebasePayload = await firebaseAuthRequest("accounts:signInWithPassword", {
+    email: normalizedEmail,
+    password,
+    returnSecureToken: true
+  });
+  setFirebaseAuthState(firebasePayload);
+  let user;
   try {
-    const firebasePayload = await firebaseAuthRequest("accounts:signInWithPassword", {
+    user = (await getCurrentFirebaseProfile()).user;
+  } catch (_err) {
+    const fallbackUsername = normalizedEmail.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "user";
+    user = {
+      id: firebaseAuthState.localId,
+      app_user_id: 0,
       email: normalizedEmail,
-      password,
-      returnSecureToken: true
-    });
-    return createAppSessionFromFirebase(firebasePayload);
-  } catch (error) {
-    firebaseError = error;
+      username: fallbackUsername,
+      profile_image_path: "",
+      last_seen_at: "",
+      online: false
+    };
+    await mirrorProfileToFirestore(user, firebaseAuthState);
   }
-
-  try {
-    if (isInvalidFirebaseLoginError(firebaseError)) {
-      return migrateLegacyLoginToFirebase({ email: normalizedEmail, password });
-    }
-    return migrateLegacyLoginToFirebase({ email: normalizedEmail, password });
-  } catch (legacyError) {
-    throw isInvalidFirebaseLoginError(firebaseError) ? legacyError : firebaseError;
-  }
+  return createFirebaseSessionResponse(user);
 }
 
 async function logoutEverywhere(token) {
-  try {
-    if (token) {
-      await request("/auth/logout", { method: "POST", token });
-    }
-  } finally {
-    firebaseAuthState = null;
-    currentAuthProvider = "firebase";
-  }
+  firebaseAuthState = null;
 }
 
 async function updateProfileEverywhere(token, data) {
-  const response = await request("/me/profile", { method: "PATCH", token, body: data });
-  const firebaseUser = firebaseAuthState
-    ? { ...response.user, id: firebaseAuthState.localId, app_user_id: response.user.id }
-    : response.user;
-  await mirrorProfileToFirestore(firebaseUser);
-  return { ...response, user: firebaseUser };
+  const auth = await requireFirebaseAuth(token);
+  const current = await getFirebaseUser(auth.localId);
+  const username = String(data.username || current.username || "").trim();
+  if (!username) {
+    throw new Error("Username is required.");
+  }
+  if (username.toLowerCase() !== String(current.username || "").toLowerCase()) {
+    const rows = await firestoreQuery("users", [["username_lower", "EQUAL", username.toLowerCase()]]);
+    if (rows.some((row) => row.id !== auth.localId)) {
+      throw new Error("Username already taken.");
+    }
+  }
+  const user = {
+    ...current,
+    username,
+    profile_image_path: data.profile_image_path || current.profile_image_path || ""
+  };
+  await mirrorProfileToFirestore(user, auth);
+  return { user };
 }
 
-function requireFirebaseAuth() {
-  if (!firebaseAuthState || !firebaseAuthState.idToken || !firebaseAuthState.localId) {
+async function requireFirebaseAuth(token) {
+  if (token && !firebaseAuthState) {
+    const session = decodeSessionToken(token);
+    if (session) {
+      firebaseAuthState = session;
+    }
+  }
+  if (!firebaseAuthState || !firebaseAuthState.refreshToken || !firebaseAuthState.localId) {
     throw new Error("Please sign in again.");
   }
-  return firebaseAuthState;
+  return refreshFirebaseAuthState();
 }
 
 async function getFirebaseUser(uid) {
@@ -402,13 +426,13 @@ async function findFirebaseUserByUsername(username) {
 }
 
 async function getCurrentFirebaseProfile() {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const user = await getFirebaseUser(auth.localId);
   return { user };
 }
 
 async function firebaseHeartbeat() {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   await firestorePatch(`users/${encodeURIComponent(auth.localId)}`, auth.idToken, {
     last_seen_at: nowIso(),
     updated_at: nowIso()
@@ -417,7 +441,7 @@ async function firebaseHeartbeat() {
 }
 
 async function getFirebaseFriends() {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const rows = await firestoreQuery("friendships", [["user_ids", "ARRAY_CONTAINS", auth.localId]]);
   const friends = [];
   for (const row of rows) {
@@ -439,7 +463,7 @@ async function getFirebaseFriends() {
 }
 
 async function sendFirebaseFriendRequest(_token, username) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const target = await findFirebaseUserByUsername(username);
   if (target.id === auth.localId) {
     throw new Error("You cannot add yourself.");
@@ -465,7 +489,7 @@ async function sendFirebaseFriendRequest(_token, username) {
 }
 
 async function getFirebaseFriendRequests() {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const incomingRows = await firestoreQuery("friendRequests", [
     ["to_uid", "EQUAL", auth.localId],
     ["status", "EQUAL", "pending"]
@@ -502,7 +526,7 @@ async function getFirebaseFriendRequests() {
 }
 
 async function acceptFirebaseFriendRequest(_token, requestId) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const reqDoc = await firestoreGet(`friendRequests/${encodeURIComponent(requestId)}`);
   const fromUid = firestoreScalar(reqDoc.fields.from_uid);
   const toUid = firestoreScalar(reqDoc.fields.to_uid);
@@ -534,7 +558,7 @@ async function acceptFirebaseFriendRequest(_token, requestId) {
 }
 
 async function updateFirebaseFriendRequest(_token, requestId, status) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const reqDoc = await firestoreGet(`friendRequests/${encodeURIComponent(requestId)}`);
   const fromUid = firestoreScalar(reqDoc.fields.from_uid);
   const toUid = firestoreScalar(reqDoc.fields.to_uid);
@@ -549,7 +573,7 @@ async function updateFirebaseFriendRequest(_token, requestId, status) {
 }
 
 async function removeFirebaseFriend(_token, userId) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const id = pairId(auth.localId, userId);
   await firestoreDelete(`friendships/${id}`);
   await firestoreDelete(`conversations/${id}`).catch(() => null);
@@ -557,7 +581,7 @@ async function removeFirebaseFriend(_token, userId) {
 }
 
 async function getFirebaseConversations() {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const rows = await firestoreQuery("conversations", [["member_ids", "ARRAY_CONTAINS", auth.localId]]);
   const conversations = [];
   for (const row of rows) {
@@ -584,7 +608,7 @@ async function getFirebaseConversations() {
 }
 
 async function createFirebaseGroupConversation(_token, title, memberIds) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const uniqueMembers = [...new Set([auth.localId, ...memberIds.map(String)])];
   const conversationId = `group_${randomId(18)}`;
   const now = nowIso();
@@ -627,7 +651,7 @@ async function getFirebaseMessages(_token, conversationId) {
 }
 
 async function sendFirebaseMessage(_token, conversationId, body, displayMode = "coded", attachment = null) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const messageId = `msg_${Date.now()}_${randomId(8)}`;
   const now = nowIso();
   await firestorePatch(`messages/${messageId}`, auth.idToken, {
@@ -661,7 +685,7 @@ async function sendFirebaseMessage(_token, conversationId, body, displayMode = "
 }
 
 async function createFirebaseGroupInvite(_token, conversationId, expiresIn = "24h") {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
   if (firestoreScalar(conversation.fields.created_by_user_id) !== auth.localId) {
     throw new Error("Only the group creator can create invite links.");
@@ -688,7 +712,7 @@ async function createFirebaseGroupInvite(_token, conversationId, expiresIn = "24
 }
 
 async function revokeFirebaseGroupInvites(_token, conversationId) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const rows = await firestoreQuery("groupInvites", [
     ["conversation_id", "EQUAL", String(conversationId)],
     ["revoked_at", "EQUAL", ""]
@@ -703,7 +727,7 @@ async function revokeFirebaseGroupInvites(_token, conversationId) {
 }
 
 async function getFirebaseGroupInvite(_token, inviteToken) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const invite = await firestoreGet(`groupInvites/${encodeURIComponent(inviteToken)}`);
   const revokedAt = firestoreScalar(invite.fields.revoked_at);
   const expiresAt = firestoreScalar(invite.fields.expires_at);
@@ -724,7 +748,7 @@ async function getFirebaseGroupInvite(_token, inviteToken) {
 }
 
 async function joinFirebaseGroupInvite(_token, inviteToken) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const lookup = await getFirebaseGroupInvite(_token, inviteToken);
   const conversationId = lookup.invite.conversation_id;
   const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
@@ -740,7 +764,7 @@ async function joinFirebaseGroupInvite(_token, inviteToken) {
 }
 
 async function leaveFirebaseConversation(_token, conversationId) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const conversation = await firestoreGet(`conversations/${encodeURIComponent(conversationId)}`);
   const memberIds = (firestoreScalar(conversation.fields.member_ids) || []).filter((uid) => uid !== auth.localId);
   await firestorePatch(`conversations/${encodeURIComponent(conversationId)}`, auth.idToken, {
@@ -751,7 +775,7 @@ async function leaveFirebaseConversation(_token, conversationId) {
 }
 
 async function blockFirebaseUser(_token, userId) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   await firestorePatch(`blocks/${pairId(auth.localId, userId)}`, auth.idToken, {
     blocker_user_id: auth.localId,
     blocked_user_id: String(userId),
@@ -762,13 +786,13 @@ async function blockFirebaseUser(_token, userId) {
 }
 
 async function unblockFirebaseUser(_token, userId) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   await firestoreDelete(`blocks/${pairId(auth.localId, userId)}`).catch(() => null);
   return { ok: true };
 }
 
 async function getFirebaseBlockedUsers() {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const rows = await firestoreQuery("blocks", [["blocker_user_id", "EQUAL", auth.localId]]);
   const blocked = [];
   for (const row of rows) {
@@ -781,7 +805,7 @@ async function getFirebaseBlockedUsers() {
 }
 
 async function reportFirebaseUser(_token, userId, reason) {
-  const auth = requireFirebaseAuth();
+  const auth = await requireFirebaseAuth();
   const reportId = `report_${Date.now()}_${randomId(8)}`;
   await firestorePatch(`reports/${reportId}`, auth.idToken, {
     reporter_user_id: auth.localId,
@@ -792,24 +816,9 @@ async function reportFirebaseUser(_token, userId, reason) {
   return { ok: true };
 }
 
-function usingFirebase() {
-  return currentAuthProvider === "firebase" && !!firebaseAuthState;
-}
-
-function apiGet(path, token) {
-  return request(path, { token });
-}
-
-function apiPost(path, token, body) {
-  return request(path, { method: "POST", token, body });
-}
-
-function apiPatch(path, token, body) {
-  return request(path, { method: "PATCH", token, body });
-}
-
-function apiDelete(path, token) {
-  return request(path, { method: "DELETE", token });
+async function withFirebaseSession(token, action) {
+  await requireFirebaseAuth(token);
+  return action();
 }
 
 contextBridge.exposeInMainWorld("codedMessages", {
@@ -818,92 +827,46 @@ contextBridge.exposeInMainWorld("codedMessages", {
 });
 
 contextBridge.exposeInMainWorld("codedApi", {
-  baseUrl: API_BASE,
-  health: () => request("/health"),
+  baseUrl: `firebase://${firebaseConfig.projectId}`,
+  health: async () => ({ ok: true, backend: "firebase", projectId: firebaseConfig.projectId }),
   authProvider: "firebase",
   register: (data) => registerWithFirebase(data),
   login: (data) => loginWithFirebase(data),
   logout: (token) => logoutEverywhere(token),
-  getMe: (token) => usingFirebase() ? getCurrentFirebaseProfile() : apiGet("/me", token),
-  heartbeat: (token) => usingFirebase() ? firebaseHeartbeat() : apiPost("/me/heartbeat", token),
+  getMe: (token) => withFirebaseSession(token, () => getCurrentFirebaseProfile()),
+  heartbeat: (token) => withFirebaseSession(token, () => firebaseHeartbeat()),
   updateProfile: (token, data) => updateProfileEverywhere(token, data),
-  getSessions: (token) => usingFirebase()
-    ? { sessions: [{ id: "firebase-current", current: true, created_at: nowIso(), last_seen_at: nowIso() }] }
-    : apiGet("/sessions", token),
-  revokeSession: (token, sessionId) => usingFirebase()
-    ? { ok: true }
-    : apiDelete(`/sessions/${encodeURIComponent(sessionId)}`, token),
-  revokeOtherSessions: (token) => usingFirebase()
-    ? { ok: true }
-    : apiDelete("/sessions", token),
-  sendFriendRequest: (token, username) => usingFirebase()
-    ? sendFirebaseFriendRequest(token, username)
-    : apiPost("/friends/request", token, { username }),
-  getFriendRequests: (token) => usingFirebase()
-    ? getFirebaseFriendRequests()
-    : apiGet("/friends/requests", token),
-  acceptFriendRequest: (token, requestId) => usingFirebase()
-    ? acceptFirebaseFriendRequest(token, requestId)
-    : apiPost(`/friends/request/${encodeURIComponent(requestId)}/accept`, token),
-  declineFriendRequest: (token, requestId) => usingFirebase()
-    ? updateFirebaseFriendRequest(token, requestId, "declined")
-    : apiPost(`/friends/request/${encodeURIComponent(requestId)}/decline`, token),
-  cancelFriendRequest: (token, requestId) => usingFirebase()
-    ? updateFirebaseFriendRequest(token, requestId, "cancelled")
-    : apiPost(`/friends/request/${encodeURIComponent(requestId)}/cancel`, token),
-  removeFriend: (token, userId) => usingFirebase()
-    ? removeFirebaseFriend(token, userId)
-    : apiDelete(`/friends/${encodeURIComponent(userId)}`, token),
-  getBlockedUsers: (token) => usingFirebase()
-    ? getFirebaseBlockedUsers()
-    : apiGet("/blocks", token),
-  blockUser: (token, userId) => usingFirebase()
-    ? blockFirebaseUser(token, userId)
-    : apiPost(`/blocks/${encodeURIComponent(userId)}`, token),
-  unblockUser: (token, userId) => usingFirebase()
-    ? unblockFirebaseUser(token, userId)
-    : apiDelete(`/blocks/${encodeURIComponent(userId)}`, token),
-  reportUser: (token, userId, reason) => usingFirebase()
-    ? reportFirebaseUser(token, userId, reason)
-    : apiPost(`/reports/${encodeURIComponent(userId)}`, token, { reason }),
-  getFriends: (token) => usingFirebase() ? getFirebaseFriends() : apiGet("/friends", token),
-  getConversations: (token) => usingFirebase() ? getFirebaseConversations() : apiGet("/conversations", token),
+  getSessions: (token) => withFirebaseSession(token, () => ({ sessions: [{ id: "firebase-current", current: true, created_at: nowIso(), last_seen_at: nowIso() }] })),
+  revokeSession: (token) => withFirebaseSession(token, () => ({ ok: true })),
+  revokeOtherSessions: (token) => withFirebaseSession(token, () => ({ ok: true })),
+  sendFriendRequest: (token, username) => withFirebaseSession(token, () => sendFirebaseFriendRequest(token, username)),
+  getFriendRequests: (token) => withFirebaseSession(token, () => getFirebaseFriendRequests()),
+  acceptFriendRequest: (token, requestId) => withFirebaseSession(token, () => acceptFirebaseFriendRequest(token, requestId)),
+  declineFriendRequest: (token, requestId) => withFirebaseSession(token, () => updateFirebaseFriendRequest(token, requestId, "declined")),
+  cancelFriendRequest: (token, requestId) => withFirebaseSession(token, () => updateFirebaseFriendRequest(token, requestId, "cancelled")),
+  removeFriend: (token, userId) => withFirebaseSession(token, () => removeFirebaseFriend(token, userId)),
+  getBlockedUsers: (token) => withFirebaseSession(token, () => getFirebaseBlockedUsers()),
+  blockUser: (token, userId) => withFirebaseSession(token, () => blockFirebaseUser(token, userId)),
+  unblockUser: (token, userId) => withFirebaseSession(token, () => unblockFirebaseUser(token, userId)),
+  reportUser: (token, userId, reason) => withFirebaseSession(token, () => reportFirebaseUser(token, userId, reason)),
+  getFriends: (token) => withFirebaseSession(token, () => getFirebaseFriends()),
+  getConversations: (token) => withFirebaseSession(token, () => getFirebaseConversations()),
   createGroupConversation: (token, title, memberIds) =>
-    usingFirebase()
-      ? createFirebaseGroupConversation(token, title, memberIds)
-      : apiPost("/conversations/groups", token, { title, member_ids: memberIds }),
+    withFirebaseSession(token, () => createFirebaseGroupConversation(token, title, memberIds)),
   createGroupInvite: (token, conversationId, expiresIn = "24h") =>
-    usingFirebase()
-      ? createFirebaseGroupInvite(token, conversationId, expiresIn)
-      : apiPost(`/conversations/${encodeURIComponent(conversationId)}/invites`, token, { expires_in: expiresIn }),
+    withFirebaseSession(token, () => createFirebaseGroupInvite(token, conversationId, expiresIn)),
   revokeGroupInvites: (token, conversationId) =>
-    usingFirebase()
-      ? revokeFirebaseGroupInvites(token, conversationId)
-      : apiDelete(`/conversations/${encodeURIComponent(conversationId)}/invites`, token),
-  getGroupInvite: (token, inviteToken) => usingFirebase()
-    ? getFirebaseGroupInvite(token, inviteToken)
-    : apiGet(`/group-invites/${encodeURIComponent(inviteToken)}`, token),
+    withFirebaseSession(token, () => revokeFirebaseGroupInvites(token, conversationId)),
+  getGroupInvite: (token, inviteToken) =>
+    withFirebaseSession(token, () => getFirebaseGroupInvite(token, inviteToken)),
   joinGroupInvite: (token, inviteToken) =>
-    usingFirebase()
-      ? joinFirebaseGroupInvite(token, inviteToken)
-      : apiPost(`/group-invites/${encodeURIComponent(inviteToken)}/join`, token),
+    withFirebaseSession(token, () => joinFirebaseGroupInvite(token, inviteToken)),
   leaveConversation: (token, conversationId) =>
-    usingFirebase()
-      ? leaveFirebaseConversation(token, conversationId)
-      : apiDelete(`/conversations/${encodeURIComponent(conversationId)}/members/me`, token),
-  getMessages: (token, conversationId) => usingFirebase()
-    ? getFirebaseMessages(token, conversationId)
-    : apiGet(`/conversations/${encodeURIComponent(conversationId)}/messages`, token),
+    withFirebaseSession(token, () => leaveFirebaseConversation(token, conversationId)),
+  getMessages: (token, conversationId) =>
+    withFirebaseSession(token, () => getFirebaseMessages(token, conversationId)),
   sendMessage: (token, conversationId, body, displayMode = "coded", attachment = null) =>
-    usingFirebase()
-      ? sendFirebaseMessage(token, conversationId, body, displayMode, attachment)
-      : apiPost(`/conversations/${encodeURIComponent(conversationId)}/messages`, token, {
-          body,
-          display_mode: displayMode,
-          attachment_name: attachment ? attachment.name : "",
-          attachment_type: attachment ? attachment.type : "",
-          attachment_data: attachment ? attachment.data : ""
-        }),
+    withFirebaseSession(token, () => sendFirebaseMessage(token, conversationId, body, displayMode, attachment)),
   chooseProfileImage: () => ipcRenderer.invoke("pick-profile-image"),
   chooseMessageAttachment: () => ipcRenderer.invoke("pick-message-attachment")
 });

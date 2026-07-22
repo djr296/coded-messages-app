@@ -4,7 +4,7 @@ Windows desktop chat app with account auth, friend requests, persisted direct an
 
 ## Current Status
 
-This project has a working Windows release with desktop install, multi-device chat, and a hosted backend.
+This project has a working Windows release with desktop install and Firebase-backed multi-device chat.
 
 Email-based account features are temporarily out of scope for the current public release.
 
@@ -16,7 +16,7 @@ The current public release is focused on:
 - multi-device sync
 - Windows install experience
 
-Firebase migration is in progress. New app sessions use Firebase Auth and Firestore for profiles, friends, blocks, reports, conversations, messages, and group invite links. Render/Supabase is still kept as a temporary compatibility bridge during sign-in until the migration is fully complete.
+The desktop app now uses Firebase Auth and Cloud Firestore directly for accounts, profiles, friends, blocks, reports, conversations, messages, and group invite links.
 
 ## Features
 
@@ -41,8 +41,7 @@ Firebase migration is in progress. New app sessions use Firebase Auth and Firest
 - Block and report controls
 - Active-session management and remote logout
 - Decrypter tab (paste coded text -> English)
-- Cloud-hosted backend for multi-device use
-- API rate limits, structured request logs, and database health checks
+- Firebase-backed multi-device sync
 
 ## Download For Windows
 
@@ -68,22 +67,17 @@ If there is no published GitHub Release yet, the installer has not been posted p
 ## Tech stack
 
 - Desktop: Electron
-- API: Express
-- Database:
-  - Local mode: SQLite via `sql.js`
-  - Hosted mode: Postgres
-  - Firebase migration: Cloud Firestore for new social/chat data
-- Auth: JWT + bcryptjs
-  - Firebase migration: Firebase Auth for new account login/register
+- Cloud data: Firebase Cloud Firestore
+- Auth: Firebase Auth
 - Email: deferred for the current public release
 
 ## Project structure
 
-- `main.js`: Electron main process + local API startup when not using a hosted backend
+- `main.js`: Electron main process
 - `preload.js`: Secure renderer bridge (`codedApi`, `codedMessages`)
-- `server/index.js`: Express API implementation for SQLite or Postgres
-- `server/index.test.js`: automated API authorization and security regression tests
-- `server/start.js`: standalone backend entrypoint
+- `server/index.js`: legacy local/server API kept in the repo for reference and tests
+- `server/index.test.js`: legacy API authorization and security regression tests
+- `server/start.js`: legacy standalone backend entrypoint
 - `server/mailer.js`: deferred email provider integration kept for future account-email work
 - `docs/EMAIL_SETUP.md`: email provider overview and hosted setup notes
 - `docs/GOOGLE_MAIL_WEBHOOK.md`: setup guide for the Google Apps Script mail webhook

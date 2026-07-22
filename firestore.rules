@@ -36,14 +36,9 @@ service cloud.firestore {
     match /friendRequests/{requestId} {
       allow read: if signedIn()
         && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid);
-      allow create: if signedIn()
-        && request.resource.data.from_uid == request.auth.uid
-        && request.resource.data.to_uid is string
-        && request.resource.data.status == "pending";
+      allow create: if signedIn();
       allow update: if signedIn()
-        && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid)
-        && request.resource.data.from_uid == resource.data.from_uid
-        && request.resource.data.to_uid == resource.data.to_uid;
+        && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid);
       allow delete: if false;
     }
 
