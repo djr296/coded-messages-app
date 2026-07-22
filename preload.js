@@ -7,6 +7,7 @@ const API_BASE = process.env.CODED_MESSAGES_API_BASE || "http://127.0.0.1:3847";
 const FIREBASE_AUTH_BASE = "https://identitytoolkit.googleapis.com/v1";
 const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
 let firebaseAuthState = null;
+let currentAuthProvider = "firebase";
 
 function nowIso() {
   return new Date().toISOString();
@@ -255,6 +256,7 @@ async function createAppSessionFromFirebase(firebasePayload, username = "") {
     localId: firebasePayload.localId || "",
     email: firebasePayload.email || ""
   };
+  currentAuthProvider = "firebase";
   const firebaseUser = {
     ...session.user,
     id: firebaseAuthState.localId,
@@ -310,24 +312,30 @@ async function migrateLegacyLoginToFirebase({ email, password }) {
     method: "POST",
     body: { email, password }
   });
-  const firebasePayload = await createFirebaseAccountForLegacyLogin({
-    email,
-    password,
-    username: legacySession.user && legacySession.user.username
-  });
+  let firebasePayload = null;
   try {
+    firebasePayload = await createFirebaseAccountForLegacyLogin({
+      email,
+      password,
+      username: legacySession.user && legacySession.user.username
+    });
     return await createAppSessionFromFirebase(
       firebasePayload,
       legacySession.user && legacySession.user.username
     );
   } catch (error) {
-    await deleteFirebaseAccount(firebasePayload.idToken);
-    throw error;
+    if (firebasePayload && firebasePayload.idToken) {
+      await deleteFirebaseAccount(firebasePayload.idToken);
+    }
+    firebaseAuthState = null;
+    currentAuthProvider = "legacy";
+    return { ...legacySession, auth_provider: "legacy" };
   }
 }
 
 async function loginWithFirebase({ email, password }) {
   const normalizedEmail = String(email || "").trim().toLowerCase();
+  let firebaseError = null;
   try {
     const firebasePayload = await firebaseAuthRequest("accounts:signInWithPassword", {
       email: normalizedEmail,
@@ -336,10 +344,16 @@ async function loginWithFirebase({ email, password }) {
     });
     return createAppSessionFromFirebase(firebasePayload);
   } catch (error) {
-    if (!isInvalidFirebaseLoginError(error)) {
-      throw error;
+    firebaseError = error;
+  }
+
+  try {
+    if (isInvalidFirebaseLoginError(firebaseError)) {
+      return migrateLegacyLoginToFirebase({ email: normalizedEmail, password });
     }
     return migrateLegacyLoginToFirebase({ email: normalizedEmail, password });
+  } catch (legacyError) {
+    throw isInvalidFirebaseLoginError(firebaseError) ? legacyError : firebaseError;
   }
 }
 
@@ -350,6 +364,7 @@ async function logoutEverywhere(token) {
     }
   } finally {
     firebaseAuthState = null;
+    currentAuthProvider = "firebase";
   }
 }
 
@@ -777,6 +792,26 @@ async function reportFirebaseUser(_token, userId, reason) {
   return { ok: true };
 }
 
+function usingFirebase() {
+  return currentAuthProvider === "firebase" && !!firebaseAuthState;
+}
+
+function apiGet(path, token) {
+  return request(path, { token });
+}
+
+function apiPost(path, token, body) {
+  return request(path, { method: "POST", token, body });
+}
+
+function apiPatch(path, token, body) {
+  return request(path, { method: "PATCH", token, body });
+}
+
+function apiDelete(path, token) {
+  return request(path, { method: "DELETE", token });
+}
+
 contextBridge.exposeInMainWorld("codedMessages", {
   encode: codec.encode,
   decode: codec.decode
@@ -789,38 +824,86 @@ contextBridge.exposeInMainWorld("codedApi", {
   register: (data) => registerWithFirebase(data),
   login: (data) => loginWithFirebase(data),
   logout: (token) => logoutEverywhere(token),
-  getMe: () => getCurrentFirebaseProfile(),
-  heartbeat: () => firebaseHeartbeat(),
+  getMe: (token) => usingFirebase() ? getCurrentFirebaseProfile() : apiGet("/me", token),
+  heartbeat: (token) => usingFirebase() ? firebaseHeartbeat() : apiPost("/me/heartbeat", token),
   updateProfile: (token, data) => updateProfileEverywhere(token, data),
-  getSessions: () => ({ sessions: [{ id: "firebase-current", current: true, created_at: nowIso(), last_seen_at: nowIso() }] }),
-  revokeSession: () => ({ ok: true }),
-  revokeOtherSessions: () => ({ ok: true }),
-  sendFriendRequest: (token, username) => sendFirebaseFriendRequest(token, username),
-  getFriendRequests: () => getFirebaseFriendRequests(),
-  acceptFriendRequest: (token, requestId) => acceptFirebaseFriendRequest(token, requestId),
-  declineFriendRequest: (token, requestId) => updateFirebaseFriendRequest(token, requestId, "declined"),
-  cancelFriendRequest: (token, requestId) => updateFirebaseFriendRequest(token, requestId, "cancelled"),
-  removeFriend: (token, userId) => removeFirebaseFriend(token, userId),
-  getBlockedUsers: () => getFirebaseBlockedUsers(),
-  blockUser: (token, userId) => blockFirebaseUser(token, userId),
-  unblockUser: (token, userId) => unblockFirebaseUser(token, userId),
-  reportUser: (token, userId, reason) => reportFirebaseUser(token, userId, reason),
-  getFriends: () => getFirebaseFriends(),
-  getConversations: () => getFirebaseConversations(),
+  getSessions: (token) => usingFirebase()
+    ? { sessions: [{ id: "firebase-current", current: true, created_at: nowIso(), last_seen_at: nowIso() }] }
+    : apiGet("/sessions", token),
+  revokeSession: (token, sessionId) => usingFirebase()
+    ? { ok: true }
+    : apiDelete(`/sessions/${encodeURIComponent(sessionId)}`, token),
+  revokeOtherSessions: (token) => usingFirebase()
+    ? { ok: true }
+    : apiDelete("/sessions", token),
+  sendFriendRequest: (token, username) => usingFirebase()
+    ? sendFirebaseFriendRequest(token, username)
+    : apiPost("/friends/request", token, { username }),
+  getFriendRequests: (token) => usingFirebase()
+    ? getFirebaseFriendRequests()
+    : apiGet("/friends/requests", token),
+  acceptFriendRequest: (token, requestId) => usingFirebase()
+    ? acceptFirebaseFriendRequest(token, requestId)
+    : apiPost(`/friends/request/${encodeURIComponent(requestId)}/accept`, token),
+  declineFriendRequest: (token, requestId) => usingFirebase()
+    ? updateFirebaseFriendRequest(token, requestId, "declined")
+    : apiPost(`/friends/request/${encodeURIComponent(requestId)}/decline`, token),
+  cancelFriendRequest: (token, requestId) => usingFirebase()
+    ? updateFirebaseFriendRequest(token, requestId, "cancelled")
+    : apiPost(`/friends/request/${encodeURIComponent(requestId)}/cancel`, token),
+  removeFriend: (token, userId) => usingFirebase()
+    ? removeFirebaseFriend(token, userId)
+    : apiDelete(`/friends/${encodeURIComponent(userId)}`, token),
+  getBlockedUsers: (token) => usingFirebase()
+    ? getFirebaseBlockedUsers()
+    : apiGet("/blocks", token),
+  blockUser: (token, userId) => usingFirebase()
+    ? blockFirebaseUser(token, userId)
+    : apiPost(`/blocks/${encodeURIComponent(userId)}`, token),
+  unblockUser: (token, userId) => usingFirebase()
+    ? unblockFirebaseUser(token, userId)
+    : apiDelete(`/blocks/${encodeURIComponent(userId)}`, token),
+  reportUser: (token, userId, reason) => usingFirebase()
+    ? reportFirebaseUser(token, userId, reason)
+    : apiPost(`/reports/${encodeURIComponent(userId)}`, token, { reason }),
+  getFriends: (token) => usingFirebase() ? getFirebaseFriends() : apiGet("/friends", token),
+  getConversations: (token) => usingFirebase() ? getFirebaseConversations() : apiGet("/conversations", token),
   createGroupConversation: (token, title, memberIds) =>
-    createFirebaseGroupConversation(token, title, memberIds),
+    usingFirebase()
+      ? createFirebaseGroupConversation(token, title, memberIds)
+      : apiPost("/conversations/groups", token, { title, member_ids: memberIds }),
   createGroupInvite: (token, conversationId, expiresIn = "24h") =>
-    createFirebaseGroupInvite(token, conversationId, expiresIn),
+    usingFirebase()
+      ? createFirebaseGroupInvite(token, conversationId, expiresIn)
+      : apiPost(`/conversations/${encodeURIComponent(conversationId)}/invites`, token, { expires_in: expiresIn }),
   revokeGroupInvites: (token, conversationId) =>
-    revokeFirebaseGroupInvites(token, conversationId),
-  getGroupInvite: (token, inviteToken) => getFirebaseGroupInvite(token, inviteToken),
+    usingFirebase()
+      ? revokeFirebaseGroupInvites(token, conversationId)
+      : apiDelete(`/conversations/${encodeURIComponent(conversationId)}/invites`, token),
+  getGroupInvite: (token, inviteToken) => usingFirebase()
+    ? getFirebaseGroupInvite(token, inviteToken)
+    : apiGet(`/group-invites/${encodeURIComponent(inviteToken)}`, token),
   joinGroupInvite: (token, inviteToken) =>
-    joinFirebaseGroupInvite(token, inviteToken),
+    usingFirebase()
+      ? joinFirebaseGroupInvite(token, inviteToken)
+      : apiPost(`/group-invites/${encodeURIComponent(inviteToken)}/join`, token),
   leaveConversation: (token, conversationId) =>
-    leaveFirebaseConversation(token, conversationId),
-  getMessages: (token, conversationId) => getFirebaseMessages(token, conversationId),
+    usingFirebase()
+      ? leaveFirebaseConversation(token, conversationId)
+      : apiDelete(`/conversations/${encodeURIComponent(conversationId)}/members/me`, token),
+  getMessages: (token, conversationId) => usingFirebase()
+    ? getFirebaseMessages(token, conversationId)
+    : apiGet(`/conversations/${encodeURIComponent(conversationId)}/messages`, token),
   sendMessage: (token, conversationId, body, displayMode = "coded", attachment = null) =>
-    sendFirebaseMessage(token, conversationId, body, displayMode, attachment),
+    usingFirebase()
+      ? sendFirebaseMessage(token, conversationId, body, displayMode, attachment)
+      : apiPost(`/conversations/${encodeURIComponent(conversationId)}/messages`, token, {
+          body,
+          display_mode: displayMode,
+          attachment_name: attachment ? attachment.name : "",
+          attachment_type: attachment ? attachment.type : "",
+          attachment_data: attachment ? attachment.data : ""
+        }),
   chooseProfileImage: () => ipcRenderer.invoke("pick-profile-image"),
   chooseMessageAttachment: () => ipcRenderer.invoke("pick-message-attachment")
 });
