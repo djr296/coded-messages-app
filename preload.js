@@ -60,6 +60,9 @@ function firestoreValue(value) {
     return { booleanValue: value };
   }
   if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return { integerValue: "0" };
+    }
     return Number.isInteger(value)
       ? { integerValue: String(value) }
       : { doubleValue: value };
@@ -225,9 +228,10 @@ async function mirrorProfileToFirestore(user, authState = firebaseAuthState) {
   }
 
   const now = new Date().toISOString();
+  const appUserId = Number(user.app_user_id || 0);
   await firestorePatch(`users/${encodeURIComponent(authState.localId)}`, authState.idToken, {
     uid: authState.localId,
-    app_user_id: Number(user.id),
+    app_user_id: Number.isFinite(appUserId) ? appUserId : 0,
     email: user.email || authState.email || "",
     username: user.username || "",
     username_lower: String(user.username || "").toLowerCase(),
