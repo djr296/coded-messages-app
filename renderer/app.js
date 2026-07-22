@@ -299,6 +299,10 @@ function formatPresence(user) {
   return "Offline";
 }
 
+function sameId(a, b) {
+  return String(a || "") === String(b || "");
+}
+
 function getSelectedFriend() {
   if (!state.selectedConversationId) {
     return null;
@@ -309,7 +313,7 @@ function getSelectedFriend() {
     return null;
   }
 
-  return state.friends.find((friend) => Number(friend.user_id) === Number(selected.other_user.id)) || null;
+  return state.friends.find((friend) => sameId(friend.user_id, selected.other_user.id)) || null;
 }
 
 function getSelectedConversation() {
@@ -317,7 +321,7 @@ function getSelectedConversation() {
     return null;
   }
   return state.conversations.find(
-    (conversation) => Number(conversation.id) === Number(state.selectedConversationId)
+    (conversation) => sameId(conversation.id, state.selectedConversationId)
   ) || null;
 }
 
@@ -451,7 +455,7 @@ function renderFriends() {
 
   state.conversations.forEach((conversation) => {
     const btn = document.createElement("button");
-    const isActive = Number(conversation.id) === Number(state.selectedConversationId);
+    const isActive = sameId(conversation.id, state.selectedConversationId);
     const isGroup = conversation.type === "group";
     const avatarUser = isGroup ? null : conversation.other_user;
     btn.className = "contact-btn" + (isActive ? " active" : "");
@@ -728,7 +732,7 @@ function renderMessages() {
     els.removeFriendBtn.classList.add("hidden");
     els.reportUserBtn.classList.add("hidden");
     els.blockUserBtn.classList.add("hidden");
-    const isCreator = Number(selectedConversation.created_by_user_id) === Number(state.me && state.me.id);
+    const isCreator = sameId(selectedConversation.created_by_user_id, state.me && state.me.id);
     els.groupInviteBtn.classList.toggle("hidden", !isCreator);
     els.groupInviteForeverBtn.classList.toggle("hidden", !isCreator);
     els.groupInviteRevokeBtn.classList.toggle("hidden", !isCreator);
@@ -748,7 +752,7 @@ function renderMessages() {
 
   state.messages.forEach((m) => {
     const div = document.createElement("div");
-    const fromMe = state.me && Number(m.sender_id) === Number(state.me.id);
+    const fromMe = state.me && sameId(m.sender_id, state.me.id);
     div.className = "msg " + (fromMe ? "me" : "them");
 
     const coded = document.createElement("div");
@@ -1068,7 +1072,7 @@ function wireEvents() {
   els.groupCreateBtn.addEventListener("click", async () => {
     const title = els.groupTitleInput.value.trim();
     const memberIds = Array.from(els.groupFriendList.querySelectorAll("input[type='checkbox']:checked"))
-      .map((checkbox) => Number(checkbox.value))
+      .map((checkbox) => checkbox.value)
       .filter(Boolean);
 
     if (!title) {

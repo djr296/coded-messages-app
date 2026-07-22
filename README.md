@@ -16,7 +16,7 @@ The current public release is focused on:
 - multi-device sync
 - Windows install experience
 
-Firebase migration setup has started. See `docs/FIREBASE_MIGRATION.md` for the migration plan and current Firebase project notes.
+Firebase migration is in progress. New app sessions use Firebase Auth and Firestore for profiles, friends, blocks, reports, conversations, messages, and group invite links. Render/Supabase is still kept as a temporary compatibility bridge during sign-in until the migration is fully complete.
 
 ## Features
 
@@ -72,9 +72,9 @@ If there is no published GitHub Release yet, the installer has not been posted p
 - Database:
   - Local mode: SQLite via `sql.js`
   - Hosted mode: Postgres
-  - Firebase migration: Cloud Firestore planned
+  - Firebase migration: Cloud Firestore for new social/chat data
 - Auth: JWT + bcryptjs
-  - Firebase migration: Firebase Auth planned
+  - Firebase migration: Firebase Auth for new account login/register
 - Email: deferred for the current public release
 
 ## Project structure
