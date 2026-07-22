@@ -1,7 +1,29 @@
 const { contextBridge, ipcRenderer } = require("electron");
 const codec = require("./shared/codec");
+const { firebaseConfig } = require("./shared/firebase-config");
 
 const API_BASE = process.env.CODED_MESSAGES_API_BASE || "http://127.0.0.1:3847";
+const FIREBASE_AUTH_BASE = "https://identitytoolkit.googleapis.com/v1";
+
+function firebaseErrorMessage(code) {
+  switch (code) {
+    case "EMAIL_EXISTS":
+      return "Email already in use.";
+    case "EMAIL_NOT_FOUND":
+    case "INVALID_PASSWORD":
+    case "INVALID_LOGIN_CREDENTIALS":
+      return "Invalid credentials.";
+    case "WEAK_PASSWORD : Password should be at least 6 characters":
+    case "WEAK_PASSWORD":
+      return "Password must be at least 6 characters.";
+    case "TOO_MANY_ATTEMPTS_TRY_LATER":
+      return "Too many attempts. Please wait and try again.";
+    case "USER_DISABLED":
+      return "This account has been disabled.";
+    default:
+      return code ? code.replace(/_/g, " ").toLowerCase() : "Firebase authentication failed.";
+  }
+}
 
 async function request(path, { method = "GET", token, body } = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -23,6 +45,63 @@ async function request(path, { method = "GET", token, body } = {}) {
   return payload;
 }
 
+async function firebaseAuthRequest(endpoint, body) {
+  const response = await fetch(`${FIREBASE_AUTH_BASE}/${endpoint}?key=${firebaseConfig.apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = payload && payload.error ? payload.error.message : "";
+    throw new Error(firebaseErrorMessage(code));
+  }
+
+  return payload;
+}
+
+async function createAppSessionFromFirebase(firebasePayload, username = "") {
+  return request("/auth/firebase-session", {
+    method: "POST",
+    body: {
+      id_token: firebasePayload.idToken,
+      username
+    }
+  });
+}
+
+async function deleteFirebaseAccount(idToken) {
+  try {
+    await firebaseAuthRequest("accounts:delete", { idToken });
+  } catch (_err) {
+    // Best-effort cleanup. The visible registration error is more important.
+  }
+}
+
+async function registerWithFirebase({ email, password, username }) {
+  const firebasePayload = await firebaseAuthRequest("accounts:signUp", {
+    email,
+    password,
+    returnSecureToken: true
+  });
+  try {
+    return await createAppSessionFromFirebase(firebasePayload, username);
+  } catch (err) {
+    await deleteFirebaseAccount(firebasePayload.idToken);
+    throw err;
+  }
+}
+
+async function loginWithFirebase({ email, password }) {
+  const firebasePayload = await firebaseAuthRequest("accounts:signInWithPassword", {
+    email,
+    password,
+    returnSecureToken: true
+  });
+  return createAppSessionFromFirebase(firebasePayload);
+}
+
 contextBridge.exposeInMainWorld("codedMessages", {
   encode: codec.encode,
   decode: codec.decode
@@ -31,8 +110,9 @@ contextBridge.exposeInMainWorld("codedMessages", {
 contextBridge.exposeInMainWorld("codedApi", {
   baseUrl: API_BASE,
   health: () => request("/health"),
-  register: (data) => request("/auth/register", { method: "POST", body: data }),
-  login: (data) => request("/auth/login", { method: "POST", body: data }),
+  authProvider: "firebase",
+  register: (data) => registerWithFirebase(data),
+  login: (data) => loginWithFirebase(data),
   logout: (token) => request("/auth/logout", { method: "POST", token }),
   getMe: (token) => request("/me", { token }),
   heartbeat: (token) => request("/me/heartbeat", { method: "POST", token }),

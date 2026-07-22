@@ -13,8 +13,8 @@ This project is migrating from the current Render + Supabase backend to Firebase
 
 Do not delete Render or Supabase until the Firebase version has passed full two-device testing.
 
-1. Add Firebase project files and client config.
-2. Move account creation and login to Firebase Auth.
+1. Add Firebase project files and client config. Done.
+2. Move account creation and login to Firebase Auth. In progress: the app now uses Firebase Auth and exchanges Firebase ID tokens for current app sessions.
 3. Add Firestore collections and security rules.
 4. Move profile and presence data.
 5. Move friend requests, friendships, blocks, and reports.

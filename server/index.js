@@ -8,6 +8,7 @@ const bcrypt = require("bcryptjs");
 const initSqlJs = require("sql.js");
 const { Pool } = require("pg");
 const { createMailer } = require("./mailer");
+const { firebaseConfig } = require("../shared/firebase-config");
 
 const ONLINE_WINDOW_MS = 90 * 1000;
 const MAX_AVATAR_BYTES = 512 * 1024;
@@ -21,6 +22,12 @@ const ALLOWED_ATTACHMENT_TYPES = new Set([
   "application/pdf",
   "text/plain"
 ]);
+const FIREBASE_CERTS_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
+let firebaseCertCache = {
+  expiresAt: 0,
+  certs: {}
+};
 
 function resolveJwtSecret({ allowInsecureDevJwt = false } = {}) {
   const configuredSecret = String(process.env.CODED_MESSAGES_JWT_SECRET || "").trim();
@@ -54,6 +61,78 @@ function publicUser(row) {
     profile_image_path: row.profile_image_path || "",
     last_seen_at: lastSeenAt,
     online: isRecentlyOnline(lastSeenAt)
+  };
+}
+
+function jsonFromBase64Url(value) {
+  return JSON.parse(Buffer.from(String(value || ""), "base64url").toString("utf8"));
+}
+
+async function getFirebaseCerts() {
+  if (firebaseCertCache.expiresAt > Date.now() && Object.keys(firebaseCertCache.certs).length) {
+    return firebaseCertCache.certs;
+  }
+
+  const response = await fetch(FIREBASE_CERTS_URL);
+  if (!response.ok) {
+    throw new Error("Could not verify Firebase login. Please try again.");
+  }
+
+  const cacheControl = response.headers.get("cache-control") || "";
+  const maxAgeMatch = /max-age=(\d+)/.exec(cacheControl);
+  const maxAgeMs = maxAgeMatch ? Number(maxAgeMatch[1]) * 1000 : 60 * 60 * 1000;
+  const certs = await response.json();
+  firebaseCertCache = {
+    expiresAt: Date.now() + maxAgeMs,
+    certs
+  };
+  return certs;
+}
+
+async function verifyFirebaseIdToken(idToken) {
+  const token = String(idToken || "").trim();
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    throw new Error("Invalid Firebase login token.");
+  }
+
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  const header = jsonFromBase64Url(encodedHeader);
+  const payload = jsonFromBase64Url(encodedPayload);
+
+  if (header.alg !== "RS256" || !header.kid) {
+    throw new Error("Invalid Firebase login token.");
+  }
+
+  const certs = await getFirebaseCerts();
+  const cert = certs[header.kid];
+  if (!cert) {
+    throw new Error("Invalid Firebase login token.");
+  }
+
+  const verifier = crypto.createVerify("RSA-SHA256");
+  verifier.update(`${encodedHeader}.${encodedPayload}`);
+  verifier.end();
+  const signature = Buffer.from(encodedSignature, "base64url");
+  if (!verifier.verify(cert, signature)) {
+    throw new Error("Invalid Firebase login token.");
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (payload.aud !== FIREBASE_PROJECT_ID || payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) {
+    throw new Error("Invalid Firebase login token.");
+  }
+  if (!payload.sub || String(payload.sub).length > 128 || Number(payload.exp) <= nowSeconds) {
+    throw new Error("Firebase login expired. Please sign in again.");
+  }
+  if (Number(payload.iat) > nowSeconds + 60) {
+    throw new Error("Invalid Firebase login token.");
+  }
+
+  return {
+    uid: String(payload.sub),
+    email: String(payload.email || "").trim().toLowerCase(),
+    emailVerified: !!payload.email_verified
   };
 }
 
@@ -219,6 +298,7 @@ async function createSqliteDb(dbPath) {
   const createStatements = [
     `CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      firebase_uid TEXT UNIQUE,
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       username TEXT NOT NULL UNIQUE,
@@ -307,6 +387,9 @@ async function createSqliteDb(dbPath) {
 
   createStatements.forEach((stmt) => run(stmt));
   const userColumns = all("PRAGMA table_info(users)");
+  if (!userColumns.some((column) => String(column.name) === "firebase_uid")) {
+    run("ALTER TABLE users ADD COLUMN firebase_uid TEXT");
+  }
   if (!userColumns.some((column) => String(column.name) === "last_seen_at")) {
     run("ALTER TABLE users ADD COLUMN last_seen_at TEXT");
   }
@@ -335,6 +418,7 @@ async function createSqliteDb(dbPath) {
   }
   [
     "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports(reported_user_id, created_at)",
@@ -394,6 +478,7 @@ async function createPostgresDb(databaseUrl) {
   const createStatements = [
     `CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
+      firebase_uid TEXT UNIQUE,
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       username TEXT NOT NULL UNIQUE,
@@ -503,6 +588,7 @@ async function createPostgresDb(databaseUrl) {
   }
 
   await run("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TEXT");
+  await run("ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid TEXT");
   await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''");
   await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'direct'");
   await run("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT");
@@ -513,6 +599,7 @@ async function createPostgresDb(databaseUrl) {
   await run("ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_data TEXT");
   for (const stmt of [
     "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_reports_reported ON reports(reported_user_id, created_at)",
@@ -565,6 +652,40 @@ async function issueSession(db, userId, jwtSecret) {
   await db.persist();
 
   return jwt.sign({ userId: Number(userId), sessionId }, jwtSecret, { expiresIn: "7d" });
+}
+
+function normalizeUsername(value, fallback = "user") {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/[^a-zA-Z0-9_.-]/g, "")
+    .slice(0, MAX_USERNAME_CHARS);
+  return cleaned || fallback;
+}
+
+async function makeAvailableUsername(db, preferred, email) {
+  const emailFallback = String(email || "user").split("@")[0];
+  const base = normalizeUsername(preferred, normalizeUsername(emailFallback, "user"));
+  const exact = await db.get("SELECT id FROM users WHERE lower(username) = lower($username)", {
+    $username: base
+  });
+  if (!exact) {
+    return base;
+  }
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const suffix = crypto.randomBytes(2).toString("hex");
+    const trimmedBase = base.slice(0, Math.max(1, MAX_USERNAME_CHARS - suffix.length - 1));
+    const candidate = `${trimmedBase}-${suffix}`;
+    const existing = await db.get("SELECT id FROM users WHERE lower(username) = lower($username)", {
+      $username: candidate
+    });
+    if (!existing) {
+      return candidate;
+    }
+  }
+
+  throw new Error("Could not create a unique username. Please try again.");
 }
 
 async function usersAreBlocked(db, userA, userB) {
@@ -838,6 +959,77 @@ async function createApiServer({
       const token = await issueSession(db, user.id, jwtSecret);
       return res.json({ token, user: publicUser(user) });
     } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/auth/firebase-session", authLimiter, async (req, res, next) => {
+    try {
+      const idToken = String(req.body.id_token || "");
+      const requestedUsername = String(req.body.username || "").trim();
+      const firebaseUser = await verifyFirebaseIdToken(idToken);
+
+      if (!firebaseUser.email) {
+        return res.status(400).json({ error: "Firebase account email is required." });
+      }
+
+      let user = await db.get("SELECT * FROM users WHERE firebase_uid = $firebaseUid", {
+        $firebaseUid: firebaseUser.uid
+      });
+
+      if (!user) {
+        user = await db.get("SELECT * FROM users WHERE email = $email", {
+          $email: firebaseUser.email
+        });
+      }
+
+      if (user) {
+        if (!user.firebase_uid) {
+          await db.run("UPDATE users SET firebase_uid = $firebaseUid WHERE id = $id", {
+            $firebaseUid: firebaseUser.uid,
+            $id: user.id
+          });
+          user.firebase_uid = firebaseUser.uid;
+        } else if (user.firebase_uid !== firebaseUser.uid) {
+          return res.status(409).json({ error: "That email is already linked to another Firebase account." });
+        }
+      } else {
+        if (requestedUsername) {
+          const existingUsername = await db.get(
+            "SELECT id FROM users WHERE lower(username) = lower($username)",
+            { $username: requestedUsername }
+          );
+          if (existingUsername) {
+            return res.status(400).json({ error: "Username already taken." });
+          }
+        }
+        const username = await makeAvailableUsername(db, requestedUsername, firebaseUser.email);
+        await db.insert(
+          `INSERT INTO users (
+            firebase_uid, email, password_hash, username, profile_image_path, created_at
+          ) VALUES (
+            $firebaseUid, $email, $passwordHash, $username, '', $createdAt
+          )`,
+          {
+            $firebaseUid: firebaseUser.uid,
+            $email: firebaseUser.email,
+            $passwordHash: `firebase:${firebaseUser.uid}`,
+            $username: username,
+            $createdAt: nowIso()
+          }
+        );
+        user = await db.get("SELECT * FROM users WHERE firebase_uid = $firebaseUid", {
+          $firebaseUid: firebaseUser.uid
+        });
+      }
+
+      await db.persist();
+      const token = await issueSession(db, user.id, jwtSecret);
+      return res.json({ token, user: publicUser(user), auth_provider: "firebase" });
+    } catch (err) {
+      if (err.message && err.message.includes("Firebase")) {
+        return res.status(401).json({ error: err.message });
+      }
       next(err);
     }
   });
