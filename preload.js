@@ -286,13 +286,61 @@ async function registerWithFirebase({ email, password, username }) {
   }
 }
 
-async function loginWithFirebase({ email, password }) {
-  const firebasePayload = await firebaseAuthRequest("accounts:signInWithPassword", {
+function isInvalidFirebaseLoginError(error) {
+  return error && String(error.message || "") === "Invalid credentials.";
+}
+
+async function createFirebaseAccountForLegacyLogin({ email, password, username }) {
+  try {
+    return await firebaseAuthRequest("accounts:signUp", {
+      email,
+      password,
+      returnSecureToken: true
+    });
+  } catch (error) {
+    if (String(error.message || "") === "Email already in use.") {
+      throw new Error("This account exists in Firebase, but that password did not work. Check the password and try again.");
+    }
+    throw error;
+  }
+}
+
+async function migrateLegacyLoginToFirebase({ email, password }) {
+  const legacySession = await request("/auth/login", {
+    method: "POST",
+    body: { email, password }
+  });
+  const firebasePayload = await createFirebaseAccountForLegacyLogin({
     email,
     password,
-    returnSecureToken: true
+    username: legacySession.user && legacySession.user.username
   });
-  return createAppSessionFromFirebase(firebasePayload);
+  try {
+    return await createAppSessionFromFirebase(
+      firebasePayload,
+      legacySession.user && legacySession.user.username
+    );
+  } catch (error) {
+    await deleteFirebaseAccount(firebasePayload.idToken);
+    throw error;
+  }
+}
+
+async function loginWithFirebase({ email, password }) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  try {
+    const firebasePayload = await firebaseAuthRequest("accounts:signInWithPassword", {
+      email: normalizedEmail,
+      password,
+      returnSecureToken: true
+    });
+    return createAppSessionFromFirebase(firebasePayload);
+  } catch (error) {
+    if (!isInvalidFirebaseLoginError(error)) {
+      throw error;
+    }
+    return migrateLegacyLoginToFirebase({ email: normalizedEmail, password });
+  }
 }
 
 async function logoutEverywhere(token) {

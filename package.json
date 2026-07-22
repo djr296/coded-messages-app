@@ -1,6 +1,6 @@
 {
   "name": "coded-messages-app",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Windows desktop obfuscated chat app",
   "author": "Coded Messages",
   "main": "main.js",
