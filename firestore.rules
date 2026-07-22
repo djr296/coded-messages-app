@@ -102,7 +102,7 @@ service cloud.firestore {
     }
 
     match /friendships/{friendshipId} {
-      allow get: if hasUid(resource.data.user_ids);
+      allow get: if signedIn();
       allow list: if false;
       allow create: if hasUid(request.resource.data.user_ids);
       allow update, delete: if hasUid(resource.data.user_ids);
