@@ -41,6 +41,8 @@ The live rules were fetched after deployment and matched the reviewed local file
 
 GitHub vulnerability alerts, automated dependency security-fix pull requests, secret scanning, and secret push protection are enabled. Weekly dependency checks and CI tests/audits are included. CI runs the Firestore rules suite against a loopback-only emulator using a pinned emulator checksum and commit-pinned actions.
 
+GitHub's security workflow passed for the coordinated update and the default branch now reports zero open Dependabot vulnerability alerts. The Google API key alert refers to the intentionally public Firebase client configuration, not a private service-account credential. Its API allowlist was narrowed to Identity Toolkit and Secure Token, and both authentication endpoints were checked after applying the restrictions. Firebase rules, not secrecy of this client key, enforce database authorization. See [Firebase's API key guidance](https://firebase.google.com/docs/projects/api-keys).
+
 Use Node 24 LTS for development. The system-wide Node 20 installation was not replaced; the coordinated build and checks used the available supported Node 24 runtime. The development launcher refuses an unsupported runtime.
 
 Primary per-account write limits are:
