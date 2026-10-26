@@ -1,15 +1,17 @@
-$nodeDir = "$env:LOCALAPPDATA\Programs\nodejs-portable\node-v20.20.1-win-x64"
 $appDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-if (-not (Test-Path "$nodeDir\node.exe")) {
-  Write-Error "Node.js not found at $nodeDir"
+$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+  Write-Error "Install Node.js 24 LTS and reopen PowerShell to run the development app."
   exit 1
 }
-
-$env:Path = "$nodeDir;$env:Path"
+$nodeVersion = [version]((& $nodeCommand.Source --version).TrimStart('v'))
+if ($nodeVersion -lt [version]'22.12.0') {
+  Write-Error "This development build needs Node.js 22.12 or newer. Node.js 24 LTS is recommended."
+  exit 1
+}
 Push-Location $appDir
 try {
-  & "$nodeDir\npm.cmd" start
+  & npm.cmd start
 } finally {
   Pop-Location
 }

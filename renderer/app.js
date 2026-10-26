@@ -7,7 +7,7 @@ if (!window.codedApi || !window.codedMessages) {
 }
 const state = {
   authMode: "login",
-  token: localStorage.getItem("coded_token") || "",
+  token: "",
   me: null,
   friends: [],
   conversations: [],
@@ -126,6 +126,7 @@ function setAuthMode(mode) {
   els.authPasswordLabel.classList.remove("hidden");
   els.authPassword.classList.remove("hidden");
   els.authPassword.required = true;
+  els.authPassword.minLength = register ? 12 : 6;
   els.authError.textContent = "";
 }
 
@@ -135,11 +136,10 @@ function showAuth(show) {
 
 function setToken(token) {
   state.token = token;
-  if (token) {
-    localStorage.setItem("coded_token", token);
-  } else {
-    localStorage.removeItem("coded_token");
-  }
+  localStorage.removeItem('coded_token');
+  window.codedApi.saveSession(token).catch((error) => {
+    showConnectionBanner(normalizeErrorMessage(error), { error: true });
+  });
 }
 
 function setFriendStatus(text) {
@@ -400,8 +400,9 @@ function buildAvatar(path, label) {
   fallback.className = "avatar-fallback";
   fallback.textContent = String(label || "?").trim().charAt(0).toUpperCase() || "?";
 
-  if (path) {
-    img.src = path;
+  const safeImage = window.codedContentSecurity.safeDataUrl(path, null, true);
+  if (safeImage) {
+    img.src = safeImage;
     img.addEventListener("error", () => {
       img.classList.add("hidden");
       fallback.classList.remove("hidden");
@@ -764,16 +765,17 @@ function renderMessages() {
       : "";
 
     let attachment = null;
-    if (m.attachment_data) {
+    const safeAttachment = window.codedContentSecurity.safeDataUrl(m.attachment_data, m.attachment_type);
+    if (safeAttachment) {
       if (String(m.attachment_type || "").startsWith("image/")) {
         attachment = document.createElement("img");
         attachment.className = "message-attachment-image";
-        attachment.src = m.attachment_data;
+        attachment.src = safeAttachment;
         attachment.alt = m.attachment_name || "Attached image";
       } else {
         attachment = document.createElement("a");
         attachment.className = "message-attachment-link";
-        attachment.href = m.attachment_data;
+        attachment.href = safeAttachment;
         attachment.download = m.attachment_name || "attachment";
         attachment.textContent = `Download ${m.attachment_name || "attachment"}`;
       }
@@ -817,6 +819,7 @@ async function refreshAccountSettings() {
   ]);
   state.blockedUsers = blockedResp.blocked || [];
   state.sessions = sessionsResp.sessions || [];
+  els.sessionsRevokeOthers.disabled = sessionsResp.remote_logout_supported === false;
   renderBlockedUsers();
   renderSessions();
 }
@@ -940,6 +943,19 @@ async function bootstrap() {
   setView("chat");
   syncMessageModeControls();
   setChatStatus("");
+
+  try {
+    const legacySession = localStorage.getItem('coded_token') || '';
+    state.token = await window.codedApi.loadSession() || legacySession;
+    if (legacySession) {
+      localStorage.removeItem('coded_token');
+      if (state.token) await window.codedApi.saveSession(state.token);
+    }
+  } catch (error) {
+    state.token = '';
+    localStorage.removeItem('coded_token');
+    showConnectionBanner(normalizeErrorMessage(error), { error: true });
+  }
 
   if (!state.token) {
     clearDecrypter();

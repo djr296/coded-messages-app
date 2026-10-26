@@ -1,10 +1,11 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, safeStorage } = require("electron");
 const fs = require("fs");
 const path = require("path");
-const { createApiServer } = require("./server");
-
-let apiServer;
-const CLOUD_API_BASE = "https://coded-messages-api.onrender.com";
+const { pathToFileURL } = require("url");
+const APP_URL = pathToFileURL(path.join(__dirname, "renderer", "index.html")).href;
+const { createSessionStore } = require('./shared/session-store');
+const { lockDownWindow } = require('./shared/window-security');
+let sessionStore;
 const IMAGE_TYPES = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -47,17 +48,34 @@ function createWindow() {
     minWidth: 980,
     minHeight: 640,
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "generated", "preload.cjs"),
       contextIsolation: true,
-      sandbox: false,
+      sandbox: true,
       nodeIntegration: false
     }
   });
 
+  lockDownWindow(win, APP_URL);
   win.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
 
-ipcMain.handle("pick-profile-image", async () => {
+function assertTrustedSender(event) {
+  if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame || event.senderFrame.url !== APP_URL) {
+    throw new Error("Untrusted application frame.");
+  }
+}
+
+ipcMain.handle('load-session', (event) => {
+  assertTrustedSender(event);
+  return sessionStore.load();
+});
+ipcMain.handle('save-session', (event, token) => {
+  assertTrustedSender(event);
+  sessionStore.save(token);
+});
+
+ipcMain.handle("pick-profile-image", async (event) => {
+  assertTrustedSender(event);
   const result = await dialog.showOpenDialog({
     title: "Choose profile image",
     properties: ["openFile"],
@@ -73,7 +91,8 @@ ipcMain.handle("pick-profile-image", async () => {
   return readFileAsDataUrl(result.filePaths[0], IMAGE_TYPES, 512 * 1024).data;
 });
 
-ipcMain.handle("pick-message-attachment", async () => {
+ipcMain.handle("pick-message-attachment", async (event) => {
+  assertTrustedSender(event);
   const result = await dialog.showOpenDialog({
     title: "Attach a file",
     properties: ["openFile"],
@@ -86,18 +105,11 @@ ipcMain.handle("pick-message-attachment", async () => {
     return null;
   }
 
-  return readFileAsDataUrl(result.filePaths[0], ATTACHMENT_TYPES, 2 * 1024 * 1024);
+  return readFileAsDataUrl(result.filePaths[0], ATTACHMENT_TYPES, 512 * 1024);
 });
 
-app.whenReady().then(async () => {
-  const externalApiBase = process.env.CODED_MESSAGES_API_BASE;
-  const resolvedApiBase = externalApiBase || (app.isPackaged ? CLOUD_API_BASE : "http://127.0.0.1:3847");
-
-  process.env.CODED_MESSAGES_API_BASE = resolvedApiBase;
-
-  if (!externalApiBase && !app.isPackaged) {
-    apiServer = await createApiServer({ port: 3847, allowInsecureDevJwt: true });
-  }
+app.whenReady().then(() => {
+  sessionStore = createSessionStore(path.join(app.getPath('userData'), 'coded-session.bin'), safeStorage);
   createWindow();
 
   app.on("activate", () => {
@@ -105,16 +117,6 @@ app.whenReady().then(async () => {
       createWindow();
     }
   });
-});
-
-app.on("before-quit", async () => {
-  if (apiServer) {
-    try {
-      await apiServer.close();
-    } catch (_err) {
-      // Ignore shutdown errors.
-    }
-  }
 });
 
 app.on("window-all-closed", () => {

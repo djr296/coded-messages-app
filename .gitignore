@@ -5,3 +5,11 @@ data/
 SHASUMS256.txt
 node-install.log
 release/
+.env
+.env.*
+!.env.example
+*-debug.log
+.tmp/
+generated/
+*-service-account.json
+service-account*.json

@@ -1,158 +1,261 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() {
-      return request.auth != null;
+    function signedIn() { return request.auth != null; }
+    function includesMe(ids) { return signedIn() && request.auth.uid in ids; }
+    function conversation(id) {
+      return get(/databases/$(database)/documents/conversations/$(id)).data;
     }
-
-    function hasUid(uids) {
-      return signedIn() && uids is list && uids.hasAny([request.auth.uid]);
+    // Sidebar copies must never grant access to messages.
+    function member(id) { return signedIn() && includesMe(conversation(id).member_ids); }
+    function blocked(a, b) {
+      return exists(/databases/$(database)/documents/userBlocks/$(a)/items/$(b))
+        || exists(/databases/$(database)/documents/userBlocks/$(b)/items/$(a));
     }
-
-    function isConversationMember(conversationId) {
-      return signedIn()
-        && exists(/databases/$(database)/documents/userConversations/$(request.auth.uid)/items/$(conversationId));
+    function accepted(a, b) {
+      let forward = a + '_' + b;
+      let reverse = b + '_' + a;
+      return (exists(/databases/$(database)/documents/friendRequests/$(forward))
+          && get(/databases/$(database)/documents/friendRequests/$(forward)).data.status == 'accepted')
+        || (exists(/databases/$(database)/documents/friendRequests/$(reverse))
+          && get(/databases/$(database)/documents/friendRequests/$(reverse)).data.status == 'accepted');
     }
-
+    function validImage(value) {
+      return value is string && value.size() <= 750000
+        && (value == '' || value.matches('data:image/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+'));
+    }
+    function validRequest(id, data) {
+      return data.keys().hasOnly(['from_uid', 'to_uid', 'status', 'created_at', 'responded_at'])
+        && data.from_uid is string && data.to_uid is string && data.from_uid != data.to_uid
+        && id == data.from_uid + '_' + data.to_uid
+        && data.created_at is string && data.responded_at is string;
+    }
+    function participant(data) {
+      return signedIn() && request.auth.uid in [data.from_uid, data.to_uid];
+    }
+    function metered(category, action) {
+      let state = getAfter(/databases/$(database)/documents/writeLimits/$(request.auth.uid)/buckets/$(category)).data;
+      return state.updated_at == request.time && state.action_id == action;
+    }
+    function validFriendship(id, data) {
+      return data.user_ids is list && data.user_ids.size() == 2
+        && data.user_ids[0] is string && data.user_ids[1] is string
+        && data.user_ids[0] != data.user_ids[1]
+        && id == data.user_ids[0] + '_' + data.user_ids[1]
+        && includesMe(data.user_ids) && accepted(data.user_ids[0], data.user_ids[1])
+        && !blocked(data.user_ids[0], data.user_ids[1]);
+    }
+    function validJoin(id) {
+      let next = request.resource.data;
+      let token = next.get('join_invite_token', '');
+      let invite = get(/databases/$(database)/documents/groupInvites/$(token)).data;
+      return resource.data.type == 'group'
+        && next.diff(resource.data).affectedKeys().hasOnly(['member_ids', 'updated_at', 'join_invite_token'])
+        && !(request.auth.uid in resource.data.member_ids)
+        && next.member_ids.toSet() == resource.data.member_ids.toSet().union([request.auth.uid].toSet())
+        && next.member_ids.size() == resource.data.member_ids.size() + 1 && next.member_ids.size() <= 50
+        && invite.conversation_id == id && invite.created_by_user_id == resource.data.created_by_user_id
+        && invite.revoked_at == '' && invite.invite_version == resource.data.get('invite_version', '0')
+        && invite.expires_at_ms is int
+        && (invite.expires_at_ms == 0 || request.time.toMillis() < invite.expires_at_ms);
+    }
+    function ownerAddsFriend() {
+      let added = request.resource.data.get('add_member_uid', '');
+      return resource.data.type == 'group' && resource.data.created_by_user_id == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['member_ids', 'updated_at', 'add_member_uid'])
+        && !(added in resource.data.member_ids)
+        && request.resource.data.member_ids.toSet() == resource.data.member_ids.toSet().union([added].toSet())
+        && request.resource.data.member_ids.size() == resource.data.member_ids.size() + 1
+        && request.resource.data.member_ids.size() <= 50
+        && exists(/databases/$(database)/documents/userFriends/$(request.auth.uid)/items/$(added))
+        && !blocked(request.auth.uid, added);
+    }
     match /users/{userId} {
-      allow read: if signedIn();
-      allow create, update: if signedIn()
-        && request.auth.uid == userId
-        && request.resource.data.keys().hasOnly([
-          "app_user_id",
-          "uid",
-          "email",
-          "username",
-          "username_lower",
-          "profile_image_path",
-          "last_seen_at",
-          "updated_at"
-        ])
-        && request.resource.data.uid is string
-        && request.resource.data.email is string
-        && request.resource.data.username is string
-        && request.resource.data.username_lower is string
-        && request.resource.data.profile_image_path is string
-        && request.resource.data.updated_at is string;
-      allow delete: if false;
-    }
-
-    match /userFriends/{userId}/items/{friendId} {
-      allow read, list: if signedIn() && request.auth.uid == userId;
-      allow create, update: if signedIn()
-        && request.resource.data.friend_uid is string
-        && request.resource.data.friendship_id is string
-        && request.resource.data.conversation_id is string
-        && (
-          request.auth.uid == userId
-          || request.resource.data.friend_uid == request.auth.uid
-        );
-      allow delete: if signedIn()
-        && (
-          request.auth.uid == userId
-          || resource.data.friend_uid == request.auth.uid
-        );
-    }
-
-    match /userFriendRequests/{userId}/{box}/{requestId} {
-      allow read, list: if signedIn() && request.auth.uid == userId;
-      allow create, update: if signedIn()
-        && box in ["incoming", "outgoing"]
-        && request.resource.data.from_uid is string
-        && request.resource.data.to_uid is string
-        && (
-          request.auth.uid == userId
-          || request.resource.data.from_uid == request.auth.uid
-          || request.resource.data.to_uid == request.auth.uid
-        );
-      allow delete: if false;
-    }
-
-    match /userConversations/{userId}/items/{conversationId} {
-      allow read, list: if signedIn() && request.auth.uid == userId;
-      allow create, update: if signedIn()
-        && request.resource.data.member_ids is list
-        && request.resource.data.member_ids.hasAny([userId])
-        && request.resource.data.member_ids.hasAny([request.auth.uid]);
-      allow delete: if signedIn()
-        && (
-          request.auth.uid == userId
-          || hasUid(resource.data.member_ids)
-        );
-    }
-
-    match /userBlocks/{userId}/items/{blockedId} {
-      allow read, list: if signedIn() && request.auth.uid == userId;
-      allow create, update: if signedIn()
-        && request.auth.uid == userId
-        && request.resource.data.blocker_user_id == request.auth.uid;
-      allow delete: if signedIn() && request.auth.uid == userId;
-    }
-
-    match /friendRequests/{requestId} {
-      allow get: if signedIn()
-        && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid);
-      allow list: if false;
-      allow create: if signedIn()
-        && request.resource.data.from_uid == request.auth.uid;
-      allow update: if signedIn()
-        && (resource.data.from_uid == request.auth.uid || resource.data.to_uid == request.auth.uid);
-      allow delete: if false;
-    }
-
-    match /friendships/{friendshipId} {
       allow get: if signedIn();
       allow list: if false;
-      allow create: if hasUid(request.resource.data.user_ids);
-      allow update, delete: if hasUid(resource.data.user_ids);
+      allow create, update: if signedIn() && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['app_user_id', 'uid', 'username', 'username_lower', 'profile_image_path', 'last_seen_at', 'updated_at'])
+        && request.resource.data.uid == userId
+        && request.resource.data.username is string && request.resource.data.username.size() >= 1
+        && request.resource.data.username.size() <= 32
+        && request.resource.data.username_lower == request.resource.data.username.lower()
+        && request.resource.data.username_lower.matches('[a-z0-9_-]{1,32}')
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username_lower)).data.uid == userId
+        && ((resource != null && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['last_seen_at', 'updated_at']))
+          || metered('profiles', 'users/' + userId))
+        && validImage(request.resource.data.profile_image_path) && request.resource.data.updated_at is string;
+      allow delete: if false;
     }
-
-    match /conversations/{conversationId} {
-      allow get: if hasUid(resource.data.member_ids) || isConversationMember(conversationId);
+    match /privateUsers/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn() && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['email', 'updated_at'])
+        && request.resource.data.email == request.auth.token.email
+        && metered('profiles', 'users/' + userId);
+      allow delete: if false;
+    }
+    match /usernames/{key} {
+      allow get: if signedIn();
+      allow list, update: if false;
+      allow create: if signedIn() && key.matches('[a-z0-9_-]{1,32}')
+        && request.resource.data.keys().hasOnly(['uid']) && request.resource.data.uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.username_lower == key;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.username_lower != key;
+    }
+    match /writeLimits/{userId}/buckets/{category} {
+      function validCounter() {
+        let next = request.resource.data;
+        let previous = resource == null ? {} : resource.data;
+        let minute = int(request.time.toMillis() / 60000);
+        let day = int(request.time.toMillis() / 86400000);
+        let minuteCap = category == 'messages' ? 60 : (category == 'social' ? 20 : 5);
+        let dayCap = category == 'messages' ? 1000 : (category == 'social' ? 200 : (category == 'profiles' ? 30 : 20));
+        return next.keys().hasOnly(['window', 'count', 'day', 'daily_count', 'action_id', 'updated_at'])
+          && next.window == minute && next.day == day
+          && next.count == (previous.get('window', -1) == minute ? previous.count + 1 : 1)
+          && next.daily_count == (previous.get('day', -1) == day ? previous.daily_count + 1 : 1)
+          && next.count <= minuteCap && next.daily_count <= dayCap
+          && next.action_id is string && next.action_id.size() <= 400
+          && next.updated_at == request.time;
+      }
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn() && request.auth.uid == userId
+        && category in ['messages', 'social', 'reports', 'profiles', 'groups', 'invites'] && validCounter();
+      allow delete: if false;
+    }
+    match /friendRequests/{id} {
+      allow get: if participant(resource.data);
+      allow list, delete: if false;
+      allow create: if signedIn() && validRequest(id, request.resource.data)
+        && metered('social', 'friendRequests/' + id)
+        && request.resource.data.from_uid == request.auth.uid && request.resource.data.status == 'pending'
+        && !blocked(request.resource.data.from_uid, request.resource.data.to_uid);
+      allow update: if signedIn() && validRequest(id, request.resource.data)
+        && metered('social', 'friendRequests/' + id)
+        && request.resource.data.from_uid == resource.data.from_uid && request.resource.data.to_uid == resource.data.to_uid
+        && ((resource.data.status == 'pending' && request.auth.uid == resource.data.to_uid
+            && request.resource.data.status in ['accepted', 'declined'])
+          || (resource.data.status == 'pending' && request.auth.uid == resource.data.from_uid
+            && request.resource.data.status == 'cancelled')
+          || (request.auth.uid == resource.data.from_uid && request.resource.data.status == 'pending'
+            && (resource.data.status in ['pending', 'declined', 'cancelled']
+              || (resource.data.status == 'accepted'
+                && !exists(/databases/$(database)/documents/friendships/$(resource.data.from_uid + '_' + resource.data.to_uid))
+                && !exists(/databases/$(database)/documents/friendships/$(resource.data.to_uid + '_' + resource.data.from_uid))))
+            && !blocked(resource.data.from_uid, resource.data.to_uid)));
+    }
+    match /userFriendRequests/{userId}/{box}/{id} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if participant(request.resource.data)
+        && ((box == 'incoming' && userId == request.resource.data.to_uid)
+          || (box == 'outgoing' && userId == request.resource.data.from_uid))
+        && request.resource.data == get(/databases/$(database)/documents/friendRequests/$(id)).data;
+      allow delete: if false;
+    }
+    match /friendships/{id} {
+      allow get: if signedIn() && (!exists(/databases/$(database)/documents/friendships/$(id)) || includesMe(resource.data.user_ids));
+      allow list, update: if false;
+      allow create: if validFriendship(id, request.resource.data);
+      allow delete: if includesMe(resource.data.user_ids);
+    }
+    match /userFriends/{userId}/items/{friendId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn()
+        && request.resource.data.keys().hasOnly(['friend_uid', 'friendship_id', 'conversation_id', 'created_at'])
+        && request.resource.data.friend_uid == friendId && request.auth.uid in [userId, friendId]
+        && get(/databases/$(database)/documents/friendships/$(request.resource.data.friendship_id)).data.user_ids.toSet() == [userId, friendId].toSet()
+        && request.resource.data.conversation_id == request.resource.data.friendship_id;
+      allow delete: if signedIn() && request.auth.uid in [userId, friendId];
+    }
+    match /conversations/{id} {
+      allow get: if member(id);
       allow list: if false;
-      allow create: if hasUid(request.resource.data.member_ids)
-        && request.resource.data.member_ids.hasAny([request.resource.data.created_by_user_id]);
-      allow update: if hasUid(resource.data.member_ids) || hasUid(request.resource.data.member_ids);
-      allow delete: if hasUid(resource.data.member_ids);
-
+      allow create: if signedIn() && includesMe(request.resource.data.member_ids)
+        && metered('groups', 'conversations/' + id)
+        && request.resource.data.member_ids is list && request.resource.data.member_ids.size() <= 50
+        && request.resource.data.title is string && request.resource.data.title.size() <= 100
+        && ((request.resource.data.type == 'group' && request.resource.data.created_by_user_id == request.auth.uid
+            && request.resource.data.member_ids == [request.auth.uid])
+          || (request.resource.data.type == 'direct'
+            && validFriendship(id, {'user_ids': request.resource.data.member_ids})
+            && request.resource.data.created_by_user_id in request.resource.data.member_ids));
+      allow update: if signedIn() && (
+        (includesMe(resource.data.member_ids) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updated_at']))
+        || (includesMe(resource.data.member_ids) && resource.data.type == 'group'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['member_ids', 'updated_at'])
+          && request.resource.data.member_ids.toSet() == resource.data.member_ids.toSet().difference([request.auth.uid].toSet())
+          && request.resource.data.member_ids.size() == resource.data.member_ids.size() - 1)
+        || (includesMe(resource.data.member_ids) && resource.data.created_by_user_id == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'invite_version', 'invite_revoked_at', 'updated_at'])
+          && request.resource.data.title is string && request.resource.data.title.size() <= 100)
+        || ownerAddsFriend() || validJoin(id));
+      allow delete: if includesMe(resource.data.member_ids)
+        && (resource.data.type == 'direct' || resource.data.created_by_user_id == request.auth.uid);
       match /messages/{messageId} {
-        allow read, list: if isConversationMember(conversationId);
-        allow create: if isConversationMember(conversationId)
-          && request.resource.data.sender_id == request.auth.uid;
+        allow read: if member(id);
+        allow create: if member(id)
+          && metered('messages', 'conversations/' + id + '/messages/' + messageId)
+          && request.resource.data.keys().hasOnly(['conversation_id', 'sender_id', 'body', 'display_mode', 'attachment_name', 'attachment_type', 'attachment_data', 'created_at'])
+          && request.resource.data.sender_id == request.auth.uid && request.resource.data.conversation_id == id
+          && request.resource.data.body is string && request.resource.data.body.size() <= 4000
+          && request.resource.data.display_mode in ['plain', 'coded']
+          && request.resource.data.attachment_name is string && request.resource.data.attachment_name.size() <= 180
+          && request.resource.data.attachment_data is string && request.resource.data.attachment_data.size() <= 750000
+          && (request.resource.data.attachment_data == ''
+            || (request.resource.data.attachment_type in ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf', 'text/plain']
+              && request.resource.data.attachment_data.matches('data:' + request.resource.data.attachment_type + ';base64,[A-Za-z0-9+/=]+')))
+          && (request.resource.data.body.size() > 0 || request.resource.data.attachment_data.size() > 0)
+          && (conversation(id).type != 'direct' || !blocked(conversation(id).member_ids[0], conversation(id).member_ids[1]));
         allow update, delete: if false;
       }
     }
-
-    match /groupInvites/{inviteId} {
+    match /userConversations/{userId}/items/{id} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if member(id) && userId in conversation(id).member_ids
+        && request.resource.data.conversation_id == id
+        && request.resource.data.member_ids == conversation(id).member_ids
+        && request.resource.data.created_by_user_id == conversation(id).created_by_user_id
+        && request.resource.data.type == conversation(id).type && request.resource.data.title == conversation(id).title;
+      allow delete: if signedIn() && (request.auth.uid == userId || member(id)
+        || (resource.data.type == 'direct' && request.auth.uid in resource.data.member_ids));
+    }
+    match /groupInvites/{token} {
       allow get: if signedIn();
       allow list: if false;
-      allow create: if signedIn()
-        && request.resource.data.created_by_user_id == request.auth.uid;
-      allow update: if signedIn()
-        && resource.data.created_by_user_id == request.auth.uid;
+      allow create: if signedIn() && token.size() >= 32
+        && metered('invites', 'groupInvites/' + token)
+        && conversation(request.resource.data.conversation_id).type == 'group'
+        && conversation(request.resource.data.conversation_id).created_by_user_id == request.auth.uid
+        && request.resource.data.created_by_user_id == request.auth.uid
+        && request.resource.data.invite_version == conversation(request.resource.data.conversation_id).get('invite_version', '0')
+        && request.resource.data.expires_at_ms is int
+        && (request.resource.data.expires_at_ms == 0 || (request.resource.data.expires_at_ms > request.time.toMillis()
+          && request.resource.data.expires_at_ms <= request.time.toMillis() + 86460000));
+      allow update: if signedIn() && resource.data.created_by_user_id == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked_at']);
       allow delete: if false;
     }
-
-    match /blocks/{blockId} {
-      allow get: if signedIn()
-        && (resource.data.blocker_user_id == request.auth.uid || resource.data.blocked_user_id == request.auth.uid);
-      allow list: if false;
-      allow create: if signedIn()
-        && request.resource.data.blocker_user_id == request.auth.uid;
-      allow update: if false;
-      allow delete: if signedIn()
-        && resource.data.blocker_user_id == request.auth.uid;
+    match /userBlocks/{userId}/items/{blockedId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create, update: if signedIn() && request.auth.uid == userId
+        && request.resource.data.blocker_user_id == userId && request.resource.data.blocked_user_id == blockedId
+        && blockedId != userId && exists(/databases/$(database)/documents/users/$(blockedId));
+      allow delete: if signedIn() && request.auth.uid == userId;
     }
-
-    match /reports/{reportId} {
+    match /blocks/{id} {
+      allow get: if signedIn() && request.auth.uid in [resource.data.blocker_user_id, resource.data.blocked_user_id];
+      allow create: if signedIn() && request.resource.data.blocker_user_id == request.auth.uid;
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.blocker_user_id == request.auth.uid;
+    }
+    match /reports/{id} {
       allow read: if signedIn() && resource.data.reporter_user_id == request.auth.uid;
-      allow create: if signedIn() && request.resource.data.reporter_user_id == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.reporter_user_id == request.auth.uid
+        && metered('reports', 'reports/' + id)
+        && request.resource.data.reason is string && request.resource.data.reason.size() <= 1000;
       allow update, delete: if false;
     }
-
-    match /{document=**} {
-      allow read, write: if false;
-    }
+    match /{document=**} { allow read, write: if false; }
   }
 }

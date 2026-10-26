@@ -1,7 +1,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const crypto = require("crypto");
+const { encodeSessionToken, decodeSessionToken, randomId } = require('./shared/session-token');
 const codec = require("./shared/codec");
 const { firebaseConfig } = require("./shared/firebase-config");
+const { validateAttachment } = require("./shared/content-security");
 
 const FIREBASE_AUTH_BASE = "https://identitytoolkit.googleapis.com/v1";
 const FIREBASE_SECURE_TOKEN_BASE = "https://securetoken.googleapis.com/v1";
@@ -12,43 +13,15 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function randomId(bytes = 16) {
-  return crypto.randomBytes(bytes).toString("base64url");
-}
-
 function pairId(a, b) {
   return [String(a), String(b)].sort().join("_");
-}
-
-function encodeSessionToken(state) {
-  return Buffer.from(JSON.stringify({
-    provider: "firebase",
-    idToken: state.idToken || "",
-    refreshToken: state.refreshToken || "",
-    localId: state.localId || "",
-    email: state.email || "",
-    expiresAt: state.expiresAt || 0
-  }), "utf8").toString("base64url");
-}
-
-function decodeSessionToken(token) {
-  if (!token) {
-    return null;
-  }
-  try {
-    const session = JSON.parse(Buffer.from(String(token), "base64url").toString("utf8"));
-    if (session && session.provider === "firebase" && session.localId && session.refreshToken) {
-      return session;
-    }
-  } catch (_err) {}
-  return null;
 }
 
 function userFromFirebaseProfile(fields = {}, uid = "") {
   return {
     id: uid || firestoreScalar(fields.uid),
     app_user_id: Number(firestoreScalar(fields.app_user_id) || 0),
-    email: firestoreScalar(fields.email) || "",
+    email: "",
     username: firestoreScalar(fields.username) || "",
     profile_image_path: firestoreScalar(fields.profile_image_path) || "",
     last_seen_at: firestoreScalar(fields.last_seen_at) || "",
@@ -66,7 +39,9 @@ function firebaseErrorMessage(code) {
       return "Invalid credentials.";
     case "WEAK_PASSWORD : Password should be at least 6 characters":
     case "WEAK_PASSWORD":
-      return "Password must be at least 6 characters.";
+      return "New passwords must be at least 12 characters.";
+    case 'PASSWORD_DOES_NOT_MEET_REQUIREMENTS':
+      return 'Use a password with at least 12 characters.';
     case "TOO_MANY_ATTEMPTS_TRY_LATER":
       return "Too many attempts. Please wait and try again.";
     case "USER_DISABLED":
@@ -163,10 +138,17 @@ async function refreshFirebaseAuthState() {
     email: payload.email || firebaseAuthState.email || "",
     expiresAt: Date.now() + Number(payload.expires_in || 3600) * 1000
   };
+  await ipcRenderer.invoke('save-session', encodeSessionToken(firebaseAuthState)).catch(() => {});
   return firebaseAuthState;
 }
 
 async function firestorePatch(path, idToken, data) {
+  const category = /^friendRequests\/[^/]+$/.test(path) ? 'social'
+    : /^reports\/[^/]+$/.test(path) ? 'reports'
+    : /^groupInvites\/[^/]+$/.test(path) && data.token ? 'invites'
+    : /^conversations\/[^/]+$/.test(path) && data.type ? 'groups'
+    : /^conversations\/[^/]+\/messages\/[^/]+$/.test(path) ? 'messages' : '';
+  if (category) return meteredWrite(category, path, data);
   const updateMask = Object.keys(data)
     .map((key) => `updateMask.fieldPaths=${encodeURIComponent(key)}`)
     .join("&");
@@ -194,7 +176,9 @@ async function firestoreGet(path, idToken = firebaseAuthState && firebaseAuthSta
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = payload && payload.error ? payload.error.message : "Could not read Firebase data.";
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -212,7 +196,66 @@ async function firestoreDelete(path, idToken = firebaseAuthState && firebaseAuth
   return { ok: true };
 }
 
-async function firestoreAppendMissing(path, fieldPath, values, idToken = firebaseAuthState && firebaseAuthState.idToken) {
+function documentWrite(path, data, currentDocument, removedFields = []) {
+  return {
+    update: {
+      name: `projects/${firebaseConfig.projectId}/databases/(default)/documents/${path}`,
+      fields: firestoreFields(data)
+    },
+    updateMask: { fieldPaths: [...Object.keys(data), ...removedFields] },
+    ...(currentDocument ? { currentDocument } : {})
+  };
+}
+
+async function firestoreCommit(writes) {
+  const auth = await requireFirebaseAuth();
+  const response = await fetch(`${FIRESTORE_BASE}:commit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${auth.idToken}` },
+    body: JSON.stringify({ writes }), signal: AbortSignal.timeout(20000)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error?.message || 'Could not save Firebase data.');
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+async function quotaWrite(category, action) {
+  const auth = await requireFirebaseAuth();
+  const quotaPath = `writeLimits/${auth.localId}/buckets/${category}`;
+  const previous = await optionalDocument(quotaPath);
+  const minute = Math.floor(Date.now() / 60000);
+  const day = Math.floor(Date.now() / 86400000);
+  const old = previous?.fields || {};
+  const count = firestoreScalar(old.window) === minute ? Number(firestoreScalar(old.count)) + 1 : 1;
+  const daily = firestoreScalar(old.day) === day ? Number(firestoreScalar(old.daily_count)) + 1 : 1;
+  const cap = category === 'messages' ? [60, 1000] : category === 'social' ? [20, 200] : category === 'profiles' ? [5, 30] : [5, 20];
+  if (count > cap[0] || daily > cap[1]) throw new Error('Sending limit reached. Please wait and try again later.');
+  const quota = documentWrite(quotaPath, { window: minute, count, day, daily_count: daily, action_id: action },
+    previous ? { updateTime: previous.updateTime } : { exists: false });
+  quota.updateTransforms = [{ fieldPath: 'updated_at', setToServerValue: 'REQUEST_TIME' }];
+  return quota;
+}
+
+async function meteredWrite(category, path, data) {
+  const auth = await requireFirebaseAuth();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const quota = await quotaWrite(category, path);
+    try { return await firestoreCommit([quota, documentWrite(path, data)]); }
+    catch (error) {
+      if (attempt === 2 || ![409, 412].includes(error.status)) throw error;
+    }
+  }
+}
+
+async function optionalDocument(path) {
+  try { return await firestoreGet(path); }
+  catch (error) { if (error.status === 404) return null; throw error; }
+}
+
+async function firestoreAppendMissing(path, fieldPath, values, idToken = firebaseAuthState && firebaseAuthState.idToken, changes = {}) {
   const documentPath = `projects/${firebaseConfig.projectId}/databases/(default)/documents/${path}`;
   const response = await fetch(`https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents:commit`, {
     method: "POST",
@@ -222,15 +265,15 @@ async function firestoreAppendMissing(path, fieldPath, values, idToken = firebas
     },
     body: JSON.stringify({
       writes: [{
-        transform: {
-          document: documentPath,
-          fieldTransforms: [{
+        update: { name: documentPath, fields: firestoreFields(changes) },
+        updateMask: { fieldPaths: Object.keys(changes) },
+        currentDocument: { exists: true },
+        updateTransforms: [{
             fieldPath,
             appendMissingElements: {
               values: values.map((value) => firestoreValue(value))
             }
           }]
-        }
       }]
     })
   });
@@ -291,8 +334,9 @@ async function firestoreQueryAt(parentPath, collectionId, filters = [], orderBy 
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const message = payload && payload.error
-      ? payload.error.message
+    const queryError = Array.isArray(payload) ? payload.find((row) => row.error)?.error : payload.error;
+    const message = queryError
+      ? queryError.message
       : `Could not query Firebase data. Firebase returned HTTP ${response.status}.`;
     throw new Error(message);
   }
@@ -314,17 +358,43 @@ async function mirrorProfileToFirestore(user, authState = firebaseAuthState) {
   }
 
   const now = new Date().toISOString();
-  const appUserId = Number(user.app_user_id || 0);
-  await firestorePatch(`users/${encodeURIComponent(authState.localId)}`, authState.idToken, {
+  const username = String(user.username || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(username)) {
+    throw new Error('Usernames must contain 1-32 letters, numbers, underscores, or hyphens.');
+  }
+  const key = username.toLowerCase();
+  const reservation = await optionalDocument(`usernames/${key}`);
+  if (reservation && firestoreScalar(reservation.fields.uid) !== authState.localId) throw new Error('Username already taken.');
+  const existing = await optionalDocument(`users/${encodeURIComponent(authState.localId)}`);
+  const oldKey = existing ? firestoreScalar(existing.fields.username_lower) : '';
+  const writes = [];
+  writes.push(await quotaWrite('profiles', `users/${authState.localId}`));
+  if (!reservation) writes.push(documentWrite(`usernames/${key}`, { uid: authState.localId }, { exists: false }));
+  const profile = {
     uid: authState.localId,
-    app_user_id: Number.isFinite(appUserId) ? appUserId : 0,
-    email: user.email || authState.email || "",
-    username: user.username || "",
-    username_lower: String(user.username || "").toLowerCase(),
+    app_user_id: Number(user.app_user_id || 0),
+    username,
+    username_lower: key,
     profile_image_path: user.profile_image_path || "",
     last_seen_at: user.last_seen_at || "",
     updated_at: now
-  });
+  };
+  writes.push(documentWrite(`users/${authState.localId}`, profile,
+    existing ? { updateTime: existing.updateTime } : { exists: false }, ['email']));
+  writes.push(documentWrite(`privateUsers/${authState.localId}`, {
+    email: authState.email || user.email || '', updated_at: now
+  }));
+  if (oldKey && oldKey !== key) {
+    const oldReservation = await optionalDocument(`usernames/${encodeURIComponent(oldKey)}`);
+    if (oldReservation && firestoreScalar(oldReservation.fields.uid) === authState.localId) {
+      writes.push({ delete: oldReservation.name, currentDocument: { updateTime: oldReservation.updateTime } });
+    }
+  }
+  try { await firestoreCommit(writes); }
+  catch (error) {
+    if ([409, 412].includes(error.status)) throw new Error('Username or profile changed. Please try again.');
+    throw error;
+  }
 }
 
 function setFirebaseAuthState(firebasePayload) {
@@ -361,8 +431,8 @@ async function registerWithFirebase({ email, password, username }) {
   if (!normalizedEmail || !password || !normalizedUsername) {
     throw new Error("Email, password, and username are required.");
   }
-  if (password.length < 6) {
-    throw new Error("Password must be at least 6 characters.");
+  if (password.length < 12) {
+    throw new Error("New passwords must be at least 12 characters.");
   }
   const firebasePayload = await firebaseAuthRequest("accounts:signUp", {
     email: normalizedEmail,
@@ -371,10 +441,6 @@ async function registerWithFirebase({ email, password, username }) {
   });
   setFirebaseAuthState(firebasePayload);
   try {
-    const existingUsername = await firestoreQuery("users", [["username_lower", "EQUAL", normalizedUsername.toLowerCase()]]);
-    if (existingUsername.length) {
-      throw new Error("Username already taken.");
-    }
     const user = {
       id: firebaseAuthState.localId,
       app_user_id: 0,
@@ -387,7 +453,7 @@ async function registerWithFirebase({ email, password, username }) {
     await mirrorProfileToFirestore(user, firebaseAuthState);
     return createFirebaseSessionResponse(user);
   } catch (err) {
-    await deleteFirebaseAccount(firebasePayload.idToken);
+    if (err.message === 'Username already taken.') await deleteFirebaseAccount(firebasePayload.idToken);
     firebaseAuthState = null;
     throw err;
   }
@@ -404,8 +470,9 @@ async function loginWithFirebase({ email, password }) {
   let user;
   try {
     user = (await getCurrentFirebaseProfile()).user;
-  } catch (_err) {
-    const fallbackUsername = normalizedEmail.split("@")[0].replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "user";
+  } catch (error) {
+    if (error.status !== 404) throw error;
+    const fallbackUsername = `user_${randomId(8).replace(/[^a-zA-Z0-9]/g, '')}`;
     user = {
       id: firebaseAuthState.localId,
       app_user_id: 0,
@@ -431,16 +498,11 @@ async function updateProfileEverywhere(token, data) {
   if (!username) {
     throw new Error("Username is required.");
   }
-  if (username.toLowerCase() !== String(current.username || "").toLowerCase()) {
-    const rows = await firestoreQuery("users", [["username_lower", "EQUAL", username.toLowerCase()]]);
-    if (rows.some((row) => row.id !== auth.localId)) {
-      throw new Error("Username already taken.");
-    }
-  }
   const user = {
     ...current,
     username,
-    profile_image_path: data.profile_image_path || current.profile_image_path || ""
+    email: auth.email,
+    profile_image_path: typeof data.profile_image_path === 'string' ? data.profile_image_path : current.profile_image_path || ""
   };
   await mirrorProfileToFirestore(user, auth);
   return { user };
@@ -531,16 +593,17 @@ async function findFirebaseUserByUsername(username) {
   if (!normalized) {
     throw new Error("Username is required.");
   }
-  const rows = await firestoreQuery("users", [["username_lower", "EQUAL", normalized]]);
-  if (!rows.length) {
+  const reservation = await optionalDocument(`usernames/${encodeURIComponent(normalized)}`);
+  if (!reservation) {
     throw new Error("User not found.");
   }
-  return userFromFirebaseProfile(rows[0].fields, rows[0].id);
+  return getFirebaseUser(firestoreScalar(reservation.fields.uid));
 }
 
 async function getCurrentFirebaseProfile() {
   const auth = await requireFirebaseAuth();
   const user = await getFirebaseUser(auth.localId);
+  user.email = auth.email;
   return { user };
 }
 
@@ -651,6 +714,7 @@ async function acceptFirebaseFriendRequest(_token, requestId) {
     throw new Error("Friend request not found.");
   }
   const friendshipId = pairId(fromUid, toUid);
+  const userIds = [fromUid, toUid].sort();
   const now = nowIso();
   await firestorePatch(`friendRequests/${encodeURIComponent(requestId)}`, auth.idToken, {
     status: "accepted",
@@ -666,16 +730,16 @@ async function acceptFirebaseFriendRequest(_token, requestId) {
   await putFriendRequestView(auth, toUid, "incoming", requestId, acceptedRequestData);
   await putFriendRequestView(auth, fromUid, "outgoing", requestId, acceptedRequestData);
   await firestorePatch(`friendships/${friendshipId}`, auth.idToken, {
-    user_a_id: friendshipId.split("_")[0],
-    user_b_id: friendshipId.split("_")[1],
-    user_ids: friendshipId.split("_"),
+    user_a_id: userIds[0],
+    user_b_id: userIds[1],
+    user_ids: userIds,
     created_at: now
   });
   await firestorePatch(`conversations/${friendshipId}`, auth.idToken, {
     id: friendshipId,
     type: "direct",
     title: "",
-    member_ids: friendshipId.split("_"),
+    member_ids: userIds,
     created_by_user_id: fromUid,
     created_at: now,
     updated_at: now
@@ -686,7 +750,7 @@ async function acceptFirebaseFriendRequest(_token, requestId) {
     id: friendshipId,
     type: "direct",
     title: "",
-    member_ids: friendshipId.split("_"),
+    member_ids: userIds,
     created_by_user_id: fromUid,
     created_at: now,
     updated_at: now
@@ -769,12 +833,19 @@ async function createFirebaseGroupConversation(_token, title, memberIds) {
     id: conversationId,
     type: "group",
     title: String(title || "Group Chat").trim() || "Group Chat",
-    member_ids: uniqueMembers,
+    member_ids: [auth.localId],
     created_by_user_id: auth.localId,
     created_at: now,
     updated_at: now,
     invite_version: "0"
   });
+  const currentMembers = [auth.localId];
+  for (const uid of uniqueMembers.filter((uid) => uid !== auth.localId)) {
+    currentMembers.push(uid);
+    await firestorePatch(`conversations/${conversationId}`, auth.idToken, {
+      member_ids: [...currentMembers], add_member_uid: uid, updated_at: nowIso()
+    });
+  }
   await putConversationForMembers(auth, conversationId, {
     id: conversationId,
     type: "group",
@@ -819,6 +890,9 @@ async function getFirebaseMessages(_token, conversationId) {
 }
 
 async function sendFirebaseMessage(_token, conversationId, body, displayMode = "coded", attachment = null) {
+  attachment = validateAttachment(attachment);
+  if (String(body || '').length > 4000) throw new Error('Messages must be 4,000 characters or fewer.');
+  if (!String(body || '').trim() && !attachment) throw new Error('A message or attachment is required.');
   const auth = await requireFirebaseAuth();
   const messageId = `msg_${Date.now()}_${randomId(8)}`;
   const now = nowIso();
@@ -877,6 +951,7 @@ async function createFirebaseGroupInvite(_token, conversationId, expiresIn = "24
     created_by_user_id: auth.localId,
     invite_version: inviteVersion,
     expires_at: expiresAt,
+    expires_at_ms: expiresAt ? new Date(expiresAt).getTime() : 0,
     revoked_at: "",
     created_at: now
   });
@@ -952,7 +1027,8 @@ async function joinFirebaseGroupInvite(_token, inviteToken) {
     `conversations/${encodeURIComponent(conversationId)}`,
     "member_ids",
     [auth.localId],
-    auth.idToken
+    auth.idToken,
+    { join_invite_token: String(inviteToken), updated_at: now }
   );
   await firestorePatch(`conversations/${encodeURIComponent(conversationId)}`, auth.idToken, {
     updated_at: now
@@ -1042,6 +1118,8 @@ contextBridge.exposeInMainWorld("codedMessages", {
 });
 
 contextBridge.exposeInMainWorld("codedApi", {
+  loadSession: () => ipcRenderer.invoke('load-session'),
+  saveSession: (token) => ipcRenderer.invoke('save-session', token),
   baseUrl: `firebase://${firebaseConfig.projectId}`,
   health: async () => ({ ok: true, backend: "firebase", projectId: firebaseConfig.projectId }),
   authProvider: "firebase",
@@ -1051,9 +1129,9 @@ contextBridge.exposeInMainWorld("codedApi", {
   getMe: (token) => withFirebaseSession(token, () => getCurrentFirebaseProfile()),
   heartbeat: (token) => withFirebaseSession(token, () => firebaseHeartbeat()),
   updateProfile: (token, data) => updateProfileEverywhere(token, data),
-  getSessions: (token) => withFirebaseSession(token, () => ({ sessions: [{ id: "firebase-current", current: true, created_at: nowIso(), last_seen_at: nowIso() }] })),
-  revokeSession: (token) => withFirebaseSession(token, () => ({ ok: true })),
-  revokeOtherSessions: (token) => withFirebaseSession(token, () => ({ ok: true })),
+  getSessions: (token) => withFirebaseSession(token, () => ({ sessions: [], remote_logout_supported: false })),
+  revokeSession: async () => { throw new Error('Remote session revocation is not available in this version.'); },
+  revokeOtherSessions: async () => { throw new Error('Remote session revocation is not available in this version.'); },
   sendFriendRequest: (token, username) => withFirebaseSession(token, () => sendFirebaseFriendRequest(token, username)),
   getFriendRequests: (token) => withFirebaseSession(token, () => getFirebaseFriendRequests()),
   acceptFriendRequest: (token, requestId) => withFirebaseSession(token, () => acceptFirebaseFriendRequest(token, requestId)),

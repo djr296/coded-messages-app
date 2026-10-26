@@ -1,0 +1,34 @@
+name: Security checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 9 * * 1'
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build:preload
+      - run: npm test
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download pinned Firestore emulator
+        shell: pwsh
+        run: |
+          $jar = Join-Path $env:RUNNER_TEMP 'firestore-emulator.jar'
+          Invoke-WebRequest 'https://storage.googleapis.com/firebase-preview-drop/emulator/cloud-firestore-emulator-v1.21.0.jar' -OutFile $jar
+          if ((Get-FileHash $jar -Algorithm SHA256).Hash -ne 'C3D3680A89D946A90A027365EA14C26C6472A162BCF37F099BBB1EBD66D25E8E') { throw 'Emulator checksum mismatch' }
+          "FIRESTORE_EMULATOR_JAR=$jar" | Out-File $env:GITHUB_ENV -Append
+      - run: npm run test:rules
+      - run: npm audit --audit-level=moderate
