@@ -20,7 +20,7 @@
   "devDependencies": {
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
-    "electron": "^45.0.0",
+    "electron": "^45.2.3",
     "electron-builder": "^26.18.0",
     "esbuild": "^0.28.2",
     "express": "^4.21.2",
